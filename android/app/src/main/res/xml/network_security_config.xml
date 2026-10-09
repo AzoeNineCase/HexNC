@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Cleartext stays OFF by default: every NetEase call the app makes goes over HTTPS, and stream URLs
+    are upgraded to https in [com.hexnc.music.data.netease.httpsStreamUrl] before they reach the
+    player. The two domain entries are a safety net only — if the service ever returns a media URL
+    that cannot be upgraded (or a host that has no TLS listener), the track still plays instead of
+    failing with a platform cleartext error. They are deliberately narrow: nothing else in the app is
+    allowed to speak plain HTTP.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">126.net</domain>
+        <domain includeSubdomains="true">163.com</domain>
+    </domain-config>
+</network-security-config>

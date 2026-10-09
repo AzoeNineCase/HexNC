@@ -1,0 +1,27 @@
+# Build output
+build/
+.gradle/
+.kotlin/
+.idea/
+*.iml
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Machine-specific configuration
+local.properties
+keystore.properties
+*.jks
+*.keystore
+*.p12
+*.pem
+
+# Installers / packages (published as GitHub Release assets instead)
+*.apk
+*.aab
+*.msi
+*.exe
+
+# OS noise
+.DS_Store
+Thumbs.db
