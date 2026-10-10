@@ -41,8 +41,21 @@ enum class AuroraTheme(
     /** Localised display name; [useChinese] comes from the active [com.hexnc.music.ui.i18n.Strings]. */
     fun label(useChinese: Boolean): String = if (useChinese) labelZh else labelEn
 
+    /**
+     * The palette colour after the softening pass described on [soften].
+     *
+     * The raw stops above were chosen while the app was phone-only; on a large, bright monitor the
+     * same chroma reads as neon, and an evening in front of one is tiring. The schemes, the
+     * gradients and the artwork placeholders all read these four properties, so this is the single
+     * place where the overall "how saturated is HexNC" decision lives.
+     */
+    val softAccent: Long get() = soften(accent)
+    val softAccentDeep: Long get() = soften(accentDeep)
+    val softGlow: Long get() = soften(glow)
+    val softBlush: Long get() = soften(blush)
+
     /** The three-stop aurora gradient, left to right: blush → accent → glow. */
-    val gradientStops: List<Color> get() = listOf(Color(blush), Color(accent), Color(glow))
+    val gradientStops: List<Color> get() = listOf(Color(softBlush), Color(softAccent), Color(softGlow))
 
     companion object {
         val DEFAULT = AURORA
@@ -56,7 +69,7 @@ enum class AuroraTheme(
 fun AuroraTheme.auroraBrush(): Brush = Brush.linearGradient(gradientStops)
 
 /** A two-stop variant used where a full three-stop gradient would be too busy. */
-fun AuroraTheme.accentBrush(): Brush = Brush.linearGradient(listOf(Color(accent), Color(glow)))
+fun AuroraTheme.accentBrush(): Brush = Brush.linearGradient(listOf(Color(softAccent), Color(softGlow)))
 
 // ------------------------------------------------------------------ colour maths
 
@@ -87,14 +100,40 @@ private fun mix(a: Long, b: Long, t: Float): Long {
 
 private fun tint(base: Long, accent: Long, amount: Float): Color = Color(mix(base, accent, amount))
 
+/**
+ * How far a palette colour is pulled toward its own luminance, then toward [NEUTRAL_GREY].
+ *
+ * A third of the way to luminance is a deliberate middle: even the loudest stop (`0xFFFF6FB5`)
+ * still reads as pink, while the large tinted surfaces stop looking like light leaks. The extra
+ * whisker of cool grey takes the last of the candy sheen off the accents.
+ */
+private const val SATURATION_CUT = 0.34f
+private const val GREY_MIX = 0.10f
+private const val NEUTRAL_GREY = 0xFF7C8290L
+
+/**
+ * The greyer, calmer restatement of a palette colour.
+ *
+ * Rec. 601 luma weights are used because they are how the eye actually mixes the three channels,
+ * so the desaturated result keeps the original's apparent brightness instead of turning muddy.
+ */
+private fun soften(argb: Long): Long {
+    fun channel(shift: Int): Float = ((argb shr shift) and 0xFF).toFloat()
+    val luma = (0.299f * channel(16) + 0.587f * channel(8) + 0.114f * channel(0)).toLong().coerceIn(0L, 255L)
+    val grey = (0xFFL shl 24) or (luma shl 16) or (luma shl 8) or luma
+    return mix(mix(argb, grey, SATURATION_CUT), NEUTRAL_GREY, GREY_MIX)
+}
+
 // ------------------------------------------------------------------ scheme builders
 
 /** Build the light scheme for [theme]. */
 fun lightColors(theme: AuroraTheme): Colors {
-    val accent = theme.accent
-    val glow = theme.glow
-    val blush = theme.blush
-    val deep = theme.accentDeep
+    // Softened palette (see [soften]): the raw stops are the phone-era look, and on a monitor they
+    // read as neon. Every tint below is derived from these four, so they are the whole decision.
+    val accent = theme.softAccent
+    val glow = theme.softGlow
+    val blush = theme.softBlush
+    val deep = theme.softAccentDeep
     return lightColorScheme(
         primary = Color(accent),
         onPrimary = Color(WHITE),
@@ -149,9 +188,10 @@ fun lightColors(theme: AuroraTheme): Colors {
 
 /** Build the dark scheme for [theme]; [amoled] collapses the base layer to true black. */
 fun darkColors(theme: AuroraTheme, amoled: Boolean = false): Colors {
-    val accent = theme.accent
-    val glow = theme.glow
-    val blush = theme.blush
+    // Softened palette, same reasoning as in [lightColors].
+    val accent = theme.softAccent
+    val glow = theme.softGlow
+    val blush = theme.softBlush
     val base = if (amoled) AMOLED else DARK_SURFACE
     val layer = if (amoled) mix(AMOLED, accent, 0.10f) else mix(DARK_SURFACE_BASE, accent, 0.12f)
     val raised = mix(layer, accent, 0.10f)

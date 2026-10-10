@@ -1,17 +1,23 @@
 package com.hexnc.music.ui
 
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -23,6 +29,7 @@ import com.hexnc.music.playback.MESSAGE_PLAYBACK_FAILED
 import com.hexnc.music.playback.MESSAGE_PLAYBACK_FILE_MISSING
 import com.hexnc.music.playback.MESSAGE_PLAYBACK_NETWORK
 import com.hexnc.music.playback.MESSAGE_PLAYBACK_UNSUPPORTED
+import com.hexnc.music.ui.components.AuroraWash
 import com.hexnc.music.ui.components.MiniPlayerBar
 import com.hexnc.music.ui.i18n.Language
 import com.hexnc.music.ui.i18n.LocalStrings
@@ -42,9 +49,14 @@ import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.NavigationBar
 import top.yukonga.miuix.kmp.basic.NavigationBarItem
+import top.yukonga.miuix.kmp.basic.NavigationRail
+import top.yukonga.miuix.kmp.basic.NavigationRailItem
+import top.yukonga.miuix.kmp.basic.NavigationRailValue
 import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.SnackbarHost
 import top.yukonga.miuix.kmp.basic.SnackbarHostState
+import top.yukonga.miuix.kmp.basic.Text
+import top.yukonga.miuix.kmp.basic.rememberNavigationRailState
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Home
 import top.yukonga.miuix.kmp.icon.extended.Playlist
@@ -167,8 +179,12 @@ fun HexNCRoot(container: AppContainer) {
 /**
  * The chrome shared by the four tab destinations.
  *
- * Puts the mini player directly above the navigation bar inside one `bottomBar` slot so the two
- * cannot drift apart, and hosts the snackbar that the playback layer reports through.
+ * Below [WIDE_LAYOUT_MIN_WIDTH] this is a phone shell: the mini player sits directly above the
+ * navigation bar inside one `bottomBar` slot so the two cannot drift apart. Above it the navigation
+ * moves to a permanent rail on the left — a desktop window has the width to spare, and a bottom bar
+ * on a 27-inch display is a thumb target nobody can reach.
+ *
+ * Hosts the snackbar that the playback layer reports through in both shapes.
  */
 @Composable
 fun HexScaffold(
@@ -183,35 +199,110 @@ fun HexScaffold(
     val playback = container.playback
     val snapshot by playback.snapshot.collectAsStateWithLifecycle()
     val currentSong by playback.current.collectAsStateWithLifecycle()
-    val scope = rememberCoroutineScope()
 
-    Scaffold(
-        topBar = topBar,
-        snackbarHost = { SnackbarHost(snackbarHostState) },
-        bottomBar = {
-            Column(modifier = Modifier.fillMaxWidth()) {
-                MiniPlayerBar(
-                    snapshot = snapshot,
-                    song = currentSong,
-                    strings = strings,
-                    onOpen = { onNavigate(Route.NowPlaying) },
-                    onToggle = { playback.toggle() },
-                    onNext = { playback.next() },
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        val wide = maxWidth >= WIDE_LAYOUT_MIN_WIDTH
+        // A soft aurora tint behind every tab screen; the playback page paints its own, stronger one.
+        val screenContent: @Composable (PaddingValues) -> Unit = { padding ->
+            Box(modifier = Modifier.fillMaxSize()) {
+                AuroraWash(
+                    modifier = Modifier.align(Alignment.TopCenter),
+                    height = 260.dp,
+                    strength = 0.5f,
                 )
-                NavigationBar {
-                    RootTab.entries.forEachIndexed { index, tab ->
-                        NavigationBarItem(
-                            selected = selectedTab == index,
-                            onClick = { onNavigate(tab.route) },
-                            icon = tab.icon(),
-                            label = tab.label(strings),
-                        )
-                    }
+                content(padding)
+            }
+        }
+        if (wide) {
+            Row(modifier = Modifier.fillMaxSize()) {
+                HexNavigationRail(
+                    selectedTab = selectedTab,
+                    onNavigate = onNavigate,
+                    strings = strings,
+                )
+                Box(modifier = Modifier.weight(1f)) {
+                    Scaffold(
+                        topBar = topBar,
+                        snackbarHost = { SnackbarHost(snackbarHostState) },
+                        bottomBar = {
+                            MiniPlayerBar(
+                                snapshot = snapshot,
+                                song = currentSong,
+                                strings = strings,
+                                onOpen = { onNavigate(Route.NowPlaying) },
+                                onPrevious = { playback.previous() },
+                                onToggle = { playback.toggle() },
+                                onNext = { playback.next() },
+                            )
+                        },
+                        content = screenContent,
+                    )
                 }
             }
-        },
-        content = content,
-    )
+        } else {
+            Scaffold(
+                topBar = topBar,
+                snackbarHost = { SnackbarHost(snackbarHostState) },
+                bottomBar = {
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        MiniPlayerBar(
+                            snapshot = snapshot,
+                            song = currentSong,
+                            strings = strings,
+                            onOpen = { onNavigate(Route.NowPlaying) },
+                            onPrevious = { playback.previous() },
+                            onToggle = { playback.toggle() },
+                            onNext = { playback.next() },
+                        )
+                        NavigationBar {
+                            RootTab.entries.forEachIndexed { index, tab ->
+                                NavigationBarItem(
+                                    selected = selectedTab == index,
+                                    onClick = { onNavigate(tab.route) },
+                                    icon = tab.icon(),
+                                    label = tab.label(strings),
+                                )
+                            }
+                        }
+                    }
+                },
+                content = screenContent,
+            )
+        }
+    }
+}
+
+/** Window width from which the shell trades the bottom bar for a permanent side rail. */
+private val WIDE_LAYOUT_MIN_WIDTH = 840.dp
+
+/** The desktop side rail: app name on top, the four destinations under it. */
+@Composable
+private fun HexNavigationRail(
+    selectedTab: Int,
+    onNavigate: (Route) -> Unit,
+    strings: Strings,
+) {
+    NavigationRail(
+        state = rememberNavigationRailState(NavigationRailValue.Expanded),
+        modifier = Modifier
+            .fillMaxHeight()
+            .width(216.dp),
+    ) {
+        Text(
+            text = strings.appName,
+            style = MiuixTheme.textStyles.title4,
+            color = MiuixTheme.colorScheme.onBackground,
+            modifier = Modifier.padding(start = 20.dp, top = 20.dp, bottom = 10.dp),
+        )
+        RootTab.entries.forEachIndexed { index, tab ->
+            NavigationRailItem(
+                selected = selectedTab == index,
+                onClick = { onNavigate(tab.route) },
+                icon = tab.icon(),
+                label = tab.label(strings),
+            )
+        }
+    }
 }
 
 /** The bottom-bar destinations, kept next to their icons and labels. */

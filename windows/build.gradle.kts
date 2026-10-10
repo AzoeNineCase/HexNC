@@ -1,5 +1,7 @@
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
+import org.jetbrains.compose.desktop.application.tasks.AbstractJPackageTask
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import java.util.UUID
 
 plugins {
     kotlin("jvm") version "2.4.20"
@@ -9,7 +11,7 @@ plugins {
 }
 
 group = "com.hexnc.music"
-version = "1.0.0"
+version = "1.1.0"
 
 repositories {
     mavenCentral()
@@ -88,7 +90,7 @@ compose.desktop {
         nativeDistributions {
             targetFormats(TargetFormat.Msi, TargetFormat.Exe)
             packageName = "HexNC"
-            packageVersion = "1.0.0"
+            packageVersion = "1.1.0"
             description = "HexNC — NetEase Cloud Music desktop client"
             vendor = "HexNC"
             copyright = "© HexNC"
@@ -105,11 +107,71 @@ compose.desktop {
 
             windows {
                 menu = true
+                // jpackage's implicit Start-menu group name came out as the garbled literal "未知"
+                // on this machine (the MSI's Directory row for ProgramMenuFolder's child). Setting it
+                // explicitly gives a normal "HexNC" folder in the Start menu.
+                menuGroup = "HexNC"
                 shortcut = true
                 dirChooser = true
                 perUserInstall = true
                 upgradeUuid = "0b7d9d1e-6b1b-4d3f-9a4e-2f5c8a1d77aa"
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Windows MSI post-processing
+// ---------------------------------------------------------------------------
+// jpackage derives the MSI ProductCode from packageName + packageVersion alone,
+// so every rebuild of one version carried the ProductCode of the already
+// installed build of that same version and Windows Installer classified the new
+// MSI as a maintenance run of the same product: `msiexec /i` returned 0 and
+// replaced nothing ("Skipping RemoveExistingProducts action: current
+// configuration is maintenance mode or an uninstall"). On top of that jpackage
+// compiles its WiX template with IncludeMaximum="no" for the app's own version,
+// so a product of the same version matches neither Upgrade row and would not be
+// removed even if the ProductCode did change.
+//
+// Handing jpackage a custom main.wxs through `--resource-dir` is not possible:
+// the Compose plugin empties that directory from inside its own task action
+// (clearDirs(jpackageResources) in prepareWorkingDir and makeArgs), i.e. after
+// any doFirst/doLast-with-dependency hook, and fails the build when the delete
+// does not succeed ("Unable to delete directory ...").
+//
+// The finished MSI is therefore edited in place. packaging/windows/patch-msi.ps1
+// gives it a build-unique ProductCode (light already stamps a fresh PackageCode
+// for every build, and the summary-information PackageCode is not writable
+// through the COM API), makes the
+// JP_UPGRADABLE_FOUND Upgrade row inclusive of the current version, and adds the
+// Start-menu "Uninstall HexNC" shortcut. The UpgradeCode stays as configured, so
+// installing a rebuilt MSI removes the previous product and installs the new one
+// (remove-then-install): one product, one ARP entry, no side-by-side install, no
+// downgrade abort. The Exe target is not covered by this patch; its embedded MSI
+// is inside the .exe.
+val hexncMsiPatchScript = layout.projectDirectory.file("packaging/windows/patch-msi.ps1")
+val hexncProductCode = "{" + UUID.randomUUID().toString().uppercase() + "}"
+
+tasks.withType(AbstractJPackageTask::class.java).configureEach {
+    if (name != "packageMsi") return@configureEach
+    val packageTask = this
+    val patchScript = hexncMsiPatchScript.asFile
+    inputs.file(patchScript)
+        .withPropertyName("hexncMsiPatchScript")
+        .withPathSensitivity(PathSensitivity.NONE)
+    doLast {
+        val msi = layout.buildDirectory.dir("compose/binaries/main/msi").get().asFile
+            .resolve("${packageTask.packageName.get()}-${packageTask.packageVersion.get()}.msi")
+        check(msi.isFile) { "HexNC: expected MSI was not produced: $msi" }
+        val process = ProcessBuilder(
+            "powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+            "-File", patchScript.absolutePath,
+            "-Msi", msi.absolutePath,
+            "-ProductCode", hexncProductCode,
+        ).redirectErrorStream(true).start()
+        val output = process.inputStream.bufferedReader().use { it.readText() }
+        val exit = process.waitFor()
+        output.lineSequence().filter { it.isNotBlank() }.forEach { logger.lifecycle(it) }
+        check(exit == 0) { "HexNC: MSI post-processing failed with exit code $exit" }
     }
 }

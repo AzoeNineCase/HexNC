@@ -87,6 +87,20 @@ class LibraryRepository(
     suspend fun songsByIds(ids: List<String>): List<Song> =
         io { if (ids.isEmpty()) emptyList() else songs.byIds(ids) }
 
+    /**
+     * The most recently played songs, in the order they were played.
+     *
+     * [ids] is newest-first and may name songs that have since been deleted, belong to another
+     * device, or were played from a source this install no longer has; the DAO's answer is therefore
+     * re-ordered against the id list instead of being trusted to come back in that order.
+     */
+    suspend fun recentlyPlayed(ids: List<String>, limit: Int = 12): List<Song> {
+        val wanted = ids.take(limit)
+        if (wanted.isEmpty()) return emptyList()
+        val found = io { songs.byIds(wanted) }.associateBy { it.id }
+        return wanted.mapNotNull { found[it] }
+    }
+
     suspend fun albums(): List<AlbumGroup> = io { songs.albums() }
 
     suspend fun albumSongs(album: String): List<Song> = io { songs.albumSongs(album) }

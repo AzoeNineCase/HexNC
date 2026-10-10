@@ -69,12 +69,23 @@ class PlaybackController(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
+    /** Decodes local DSD tracks to a cached WAV before the player ever sees them. */
+    private val dsd = DsdTranscoder(context)
+
     private var future: ListenableFuture<MediaController>? = null
     private var controller: MediaController? = null
     private var ticker: Job? = null
 
     /** The songs backing the current player queue, in player order. */
     private var queue: List<Song> = emptyList()
+
+    /**
+     * The last song id handed to the play history.
+     *
+     * Held so the history is written once per track *transition* rather than on every snapshot: the
+     * transport tick republishes the same current song several times a second.
+     */
+    private var lastRecordedId: String? = null
 
     private val _snapshot = MutableStateFlow(PlayerSnapshot())
     val snapshot: StateFlow<PlayerSnapshot> = _snapshot.asStateFlow()
@@ -195,7 +206,27 @@ class PlaybackController(
             hasNext = media.hasNextMediaItem(),
             hasPrevious = media.hasPreviousMediaItem(),
         )
-        _current.value = queue.getOrNull(index)
+        publish(queue.getOrNull(index))
+    }
+
+    /**
+     * Publishes [song] as the current track and remembers it in the play history.
+     *
+     * The history is written here, where a track is *opened*, rather than from the engine's "started"
+     * callback: a track that then fails to resolve still opened, and the history should read as what
+     * the user asked to play. The write is guarded so it happens once per transition — an explicit
+     * play, a `next()`/`previous()`, or the player advancing by itself — because the live
+     * playback-state tick keeps publishing the same song and would otherwise rewrite that entry
+     * every quarter second.
+     */
+    private fun publish(song: Song?) {
+        _current.value = song
+        if (song == null) return
+        // Mirrors the Windows `startAt` hook: record when the track is opened, not when it starts.
+        if (song.id != lastRecordedId) {
+            lastRecordedId = song.id
+            settings.addRecentlyPlayedId(song.id)
+        }
     }
 
     // ------------------------------------------------------------------ queue building
@@ -247,15 +278,26 @@ class PlaybackController(
 
             var dsdSkipped = 0
             val items = songs.mapNotNull { song ->
-                // Android has no DSD decoder, so a `.dsf`/`.dff` file would reach the extractor and
-                // come back as an opaque container error a second later. Refusing it here turns that
-                // into a message the user can act on, and lets the rest of the queue keep playing.
-                if (song.source == SongSource.LOCAL && isDsdSource(song.localPath ?: song.mediaUri)) {
-                    dsdSkipped++
-                    return@mapNotNull null
-                }
                 val uri = when (song.source) {
-                    SongSource.LOCAL -> localUriOf(song)
+                    SongSource.LOCAL -> {
+                        // Android has no DSD extractor, so a `.dsf`/`.dff` file would reach ExoPlayer
+                        // and come back as an opaque container error a second later. It is decoded to
+                        // a cached WAV here instead; only when *that* fails (DST-compressed DFF, a
+                        // malformed header, an unreadable stream) is the song skipped and reported.
+                        if (isDsdSource(song.localPath ?: song.mediaUri)) {
+                            postMessage(MESSAGE_PLAYBACK_DSD_DECODING)
+                            val pcm = dsd.pcmFor(song.id, localUriOf(song)?.let(Uri::parse))
+                            if (pcm == null) {
+                                dsdSkipped++
+                                null
+                            } else {
+                                Uri.fromFile(pcm).toString()
+                            }
+                        } else {
+                            localUriOf(song)
+                        }
+                    }
+
                     // Last stop before the URI becomes a MediaItem: the platform refuses cleartext
                     // on a modern targetSdk, and NetEase hands out `http://` media URLs, so the
                     // scheme is forced here as well as at the API boundary. Nothing downstream can
@@ -349,7 +391,7 @@ class PlaybackController(
         controller?.clearMediaItems()
         queue = emptyList()
         _queueFlow.value = emptyList()
-        _current.value = null
+        lastRecordedId = null
         pushSnapshot()
     }
 
@@ -398,11 +440,14 @@ internal const val MESSAGE_PLAYBACK_NETWORK = "playback_network"
 /** The file is gone, or the app lost the permission it needs to read it. */
 internal const val MESSAGE_PLAYBACK_FILE_MISSING = "playback_file_missing"
 
-/** Android has no decoder for this container or bitstream (DSD, exotic hi-res, DRM). */
+/** Android has no decoder for this container or bitstream (exotic hi-res, DRM). */
 internal const val MESSAGE_PLAYBACK_UNSUPPORTED = "playback_unsupported"
 
-/** A local `.dsf`/`.dff` track was skipped before the decoder could fail on it. */
+/** A local DSD track could not be decoded (DST-compressed DFF, or a malformed header) and was skipped. */
 internal const val MESSAGE_PLAYBACK_DSD = "playback_dsd"
+
+/** A local DSD track is being decoded to PCM, which takes a moment on a long file. */
+internal const val MESSAGE_PLAYBACK_DSD_DECODING = "playback_dsd_decoding"
 
 /** Anything else ExoPlayer reported. */
 internal const val MESSAGE_PLAYBACK_FAILED = "playback_failed"

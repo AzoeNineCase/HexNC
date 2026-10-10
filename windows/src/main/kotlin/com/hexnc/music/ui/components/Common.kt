@@ -4,10 +4,12 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -40,6 +42,7 @@ import com.hexnc.music.data.model.Song
 import com.hexnc.music.data.model.SongSource
 import com.hexnc.music.di.AppContainer
 import com.hexnc.music.playback.PlayerSnapshot
+import com.hexnc.music.ui.platform.secondaryClick
 import com.hexnc.music.ui.theme.LocalAuroraTheme
 import com.hexnc.music.ui.theme.LocalIsDarkTheme
 import com.hexnc.music.ui.theme.auroraBrush
@@ -50,8 +53,10 @@ import top.yukonga.miuix.kmp.basic.LinearProgressIndicator
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.basic.ArrowRight
+import top.yukonga.miuix.kmp.icon.extended.ChevronBackward
 import top.yukonga.miuix.kmp.icon.extended.ChevronForward
 import top.yukonga.miuix.kmp.icon.extended.Favorites
+import top.yukonga.miuix.kmp.icon.extended.More
 import top.yukonga.miuix.kmp.icon.extended.Music
 import top.yukonga.miuix.kmp.icon.extended.Pause
 import top.yukonga.miuix.kmp.icon.extended.Play
@@ -147,14 +152,32 @@ fun HexList(
     contentPadding: PaddingValues = PaddingValues(bottom = 24.dp),
     content: LazyListScope.() -> Unit,
 ) {
-    LazyColumn(
-        modifier = modifier.fillMaxSize().overScrollVertical(),
-        state = state,
-        contentPadding = contentPadding,
-        overscrollEffect = null,
-        content = content,
-    )
+    BoxWithConstraints(modifier = modifier.fillMaxSize()) {
+        // A list that spans a desktop window leaves the title on the far left and the row's controls
+        // hundreds of dp away on the right. Past a comfortable reading width the rows are centred.
+        val wide = maxWidth > MAX_LIST_WIDTH
+        LazyColumn(
+            modifier = Modifier
+                .then(if (wide) Modifier.width(MAX_LIST_WIDTH) else Modifier.fillMaxWidth())
+                .fillMaxHeight()
+                .align(Alignment.TopCenter)
+                .overScrollVertical(),
+            state = state,
+            contentPadding = contentPadding,
+            overscrollEffect = null,
+            content = content,
+        )
+    }
 }
+
+/** Reading width past which a list stops stretching across the window. */
+/**
+ * The measure the app's content column is held to on a wide window.
+ *
+ * Internal rather than private so screens that lay themselves out outside [HexList] — the playback
+ * detail page, most of all — can line up with the list tabs instead of each picking its own width.
+ */
+internal val MAX_LIST_WIDTH = 1120.dp
 
 /** A small section heading with an optional trailing action. */
 @Composable
@@ -273,7 +296,10 @@ fun SongRow(
         if (song.source == SongSource.NETEASE) append(" · ").append(strings.neteaseMusic)
     }
     Card(
-        modifier = modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp),
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 2.dp)
+            .secondaryClick(enabled = onLongClick != null) { onLongClick?.invoke() },
         cornerRadius = 16.dp,
         insideMargin = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
         colors = top.yukonga.miuix.kmp.basic.CardDefaults.defaultColors(
@@ -324,7 +350,35 @@ fun SongRow(
                 Spacer(Modifier.width(6.dp))
                 trailing()
             }
+            if (onLongClick != null) {
+                Spacer(Modifier.width(2.dp))
+                MoreActionsButton(contentDescription = strings.moreActions, onClick = onLongClick)
+            }
         }
+    }
+}
+
+/**
+ * The visible half of the row action model.
+ *
+ * Long-press (touch) and right-click (mouse) both open the action sheet, but neither is discoverable
+ * on its own — so every row that has actions also carries this button. It is deliberately quiet
+ * (transparent, muted tint) so a list of them does not turn into a wall of dots.
+ */
+@Composable
+internal fun MoreActionsButton(contentDescription: String, onClick: () -> Unit) {
+    IconButton(
+        onClick = onClick,
+        minWidth = 36.dp,
+        minHeight = 36.dp,
+        backgroundColor = Color.Transparent,
+    ) {
+        Icon(
+            imageVector = MiuixIcons.More,
+            contentDescription = contentDescription,
+            modifier = Modifier.size(18.dp),
+            tint = MiuixTheme.colorScheme.onBackgroundVariant,
+        )
     }
 }
 
@@ -342,7 +396,10 @@ fun CollectionRow(
     onLongClick: (() -> Unit)? = null,
 ) {
     Card(
-        modifier = modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp),
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 2.dp)
+            .secondaryClick(enabled = onLongClick != null) { onLongClick?.invoke() },
         cornerRadius = 16.dp,
         insideMargin = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
         colors = top.yukonga.miuix.kmp.basic.CardDefaults.defaultColors(
@@ -385,6 +442,10 @@ fun CollectionRow(
                 modifier = Modifier.size(18.dp),
                 tint = MiuixTheme.colorScheme.onBackgroundVariant,
             )
+            if (onLongClick != null) {
+                Spacer(Modifier.width(2.dp))
+                MoreActionsButton(contentDescription = strings.moreActions, onClick = onLongClick)
+            }
         }
     }
 }
@@ -403,6 +464,7 @@ fun MiniPlayerBar(
     strings: com.hexnc.music.ui.i18n.Strings,
     modifier: Modifier = Modifier,
     onOpen: () -> Unit,
+    onPrevious: () -> Unit,
     onToggle: () -> Unit,
     onNext: () -> Unit,
 ) {
@@ -410,26 +472,26 @@ fun MiniPlayerBar(
     Column(modifier = modifier.fillMaxWidth()) {
         LinearProgressIndicator(
             progress = snapshot.progress,
-            modifier = Modifier.fillMaxWidth().height(2.dp),
+            modifier = Modifier.fillMaxWidth().height(3.dp),
         )
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .clickable(onClick = onOpen)
-                .padding(horizontal = 12.dp, vertical = 8.dp),
+                .padding(horizontal = 16.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             CoverArt(
                 coverUrl = song.coverUrl,
                 overridePath = song.coverOverridePath,
-                size = 42.dp,
+                size = 46.dp,
                 corner = 12.dp,
             )
-            Spacer(Modifier.width(10.dp))
+            Spacer(Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = song.title,
-                    style = MiuixTheme.textStyles.footnote1,
+                    style = MiuixTheme.textStyles.body2,
                     fontWeight = FontWeight.Medium,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -442,11 +504,19 @@ fun MiniPlayerBar(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
+            IconButton(onClick = onPrevious, minWidth = 40.dp, minHeight = 40.dp) {
+                Icon(
+                    imageVector = MiuixIcons.ChevronBackward,
+                    contentDescription = strings.previous,
+                    modifier = Modifier.size(24.dp),
+                    tint = MiuixTheme.colorScheme.onBackground,
+                )
+            }
             IconButton(onClick = onToggle, minWidth = 40.dp, minHeight = 40.dp) {
                 Icon(
                     imageVector = if (snapshot.isPlaying) MiuixIcons.Pause else MiuixIcons.Play,
                     contentDescription = if (snapshot.isPlaying) strings.pause else strings.play,
-                    modifier = Modifier.size(24.dp),
+                    modifier = Modifier.size(26.dp),
                     tint = MiuixTheme.colorScheme.onBackground,
                 )
             }

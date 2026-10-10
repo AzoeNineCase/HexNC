@@ -244,6 +244,35 @@ class NeteaseApi(private val client: NeteaseClient) {
     suspend fun albumDetail(albumId: Long): NcAlbumDetailResponse =
         client.apiEmpty("/api/v1/album/$albumId").requireSuccess("/api/v1/album").decode()
 
+    /**
+     * The albums the signed-in account has favourited, one page at a time.
+     *
+     * The plain `api` transport is tried first because the analogous sublist route
+     * (`/api/user/playlist`) answers there; the eapi retry covers the case where the service serves
+     * this one encrypted only. `total=true` is what makes the reply carry `hasMore`, which is the
+     * only reliable paging signal this route offers.
+     */
+    suspend fun albumSublist(limit: Int = 100, offset: Int = 0): NcAlbumSublistResponse {
+        val form = mapOf(
+            "limit" to limit.toString(),
+            "offset" to offset.toString(),
+            "total" to "true",
+        )
+        val json = runCatching {
+            client.api("/api/album/sublist", form).requireSuccess("/api/album/sublist")
+        }.getOrElse {
+            client.eapi(
+                "/api/album/sublist",
+                buildJsonObject {
+                    put("limit", limit)
+                    put("offset", offset)
+                    put("total", true)
+                },
+            ).requireSuccess("/api/album/sublist")
+        }
+        return json.decode()
+    }
+
     suspend fun artistTopSongs(artistId: Long): List<NcSong> {
         val json = client.api("/api/artist/top/song", mapOf("id" to artistId.toString()))
             .requireSuccess("/api/artist/top/song")

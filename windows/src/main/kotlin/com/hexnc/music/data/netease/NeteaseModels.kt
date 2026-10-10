@@ -35,7 +35,26 @@ data class NcAlbum(
     val picUrl: String? = null,
     /** Only present on album-detail responses. */
     val artist: NcArtist? = null,
+    /** Only present on the favourited-album list, which uses the plural key. */
+    val artists: List<NcArtist> = emptyList(),
     val size: Int = 0,
+) {
+    /** Whichever of the two shapes this response used; empty when neither was sent. */
+    val artistName: String
+        get() = artist?.name ?: artists.firstOrNull()?.name.orEmpty()
+}
+
+/**
+ * The signed-in account's favourited albums (`/api/album/sublist`).
+ *
+ * Only the paging flag and the album array are read: a page that carries an empty [albums] list is a
+ * legitimate "nothing (more) favourited" rather than an error, so an empty result never throws.
+ */
+@Serializable
+data class NcAlbumSublistResponse(
+    val albums: List<NcAlbum> = emptyList(),
+    val hasMore: Boolean = false,
+    val code: Int = 200,
 )
 
 @Serializable

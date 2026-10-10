@@ -116,38 +116,30 @@ internal class AudioEngine(private val listener: Listener) {
         try {
             while (!released) {
                 AudioSystem.getAudioInputStream(file).use { source ->
-                    val basePcm = pcmFormatFor(source.format)
-                    val baseStream =
-                        if (basePcm == source.format) source else AudioSystem.getAudioInputStream(basePcm, source)
-                    // A 192 kHz file (or any rate this machine's mixer refuses) would otherwise fail
-                    // the whole track. Asking Java Sound for a rate the device does accept is what
-                    // lets those files play; when no converter is available the original format is
-                    // kept, which leaves the previous behaviour — including the failure report —
-                    // exactly as it was.
-                    val preferred = deviceRateFormat(basePcm)
-                    var chosenPcm = basePcm
-                    var stream = baseStream
-                    if (preferred != basePcm) {
-                        val converted = runCatching { AudioSystem.getAudioInputStream(preferred, baseStream) }
-                            .getOrNull()
-                        if (converted != null) {
-                            stream = converted
-                            chosenPcm = preferred
-                        }
-                    }
-                    val pcm = chosenPcm
+                    // Which format the device really accepts is only known by trying to open it, so
+                    // the candidates are walked in order of preference: the file's own rate (or the
+                    // DSD decoder's PCM) first, then the usual consumer rates.
+                    val choice = openOutput(source)
+                    val stream = choice.stream
+                    val pcm = choice.format
                     try {
                         val rate = pcm.frameRate.toLong().coerceAtLeast(1L)
                         val frameSize = pcm.frameSize.coerceAtLeast(1)
-                        val totalFrames = if (stream.frameLength > 0) stream.frameLength else source.frameLength
-                        val totalMs = if (totalFrames > 0) totalFrames * 1000L / rate else 0L
+                        // The duration comes from the file itself, not from the chosen output: a
+                        // converted stream's frame length is only reliable for the rate it was asked
+                        // for, and the device may have made us fall back to another one.
+                        val totalMs = if (source.frameLength > 0) {
+                            source.frameLength * 1000L / source.format.frameRate.toLong().coerceAtLeast(1L)
+                        } else {
+                            0L
+                        }
                         duration.set(totalMs)
                         skipTo(stream, startMs, rate, frameSize)
                         framesRead.set(0L)
                         position.set(startMs)
                         listener.onStarted(totalMs)
 
-                        val device = openLine(pcm)
+                        val device = choice.line
                         line = device
                         var ended = false
                         try {
@@ -254,60 +246,122 @@ internal class AudioEngine(private val listener: Listener) {
         }
     }
 
+    /** One way of feeding a source to the device: the stream to read, its format, and the open line. */
+    private data class OutputChoice(
+        val stream: AudioInputStream,
+        val format: AudioFormat,
+        val line: SourceDataLine,
+    )
+
     /**
-     * Picks a PCM rate the output device will actually open.
+     * Opens the best output the machine will actually accept for [source].
      *
-     * [base] is returned untouched whenever the device accepts it, so ordinary files take exactly the
-     * path they always did. Only when the mixer refuses the format — a 192 kHz local file is the
-     * common way to hit that — is the first widely supported consumer rate chosen instead, and Java
-     * Sound then converts the samples on the way to the line.
+     * Java Sound's `isLineSupported` is optimistic — it answers `true` for rates far above anything
+     * the hardware plays, and 1-bit DSD decoded to 176.4 kHz PCM is refused outright by mixers that
+     * only speak 48 kHz. So every candidate from [outputCandidates] is opened for real and the first
+     * that works wins; only when they all fail is the last failure reported.
      */
-    private fun deviceRateFormat(base: AudioFormat): AudioFormat {
-        fun supported(format: AudioFormat): Boolean = runCatching {
-            AudioSystem.isLineSupported(DataLine.Info(SourceDataLine::class.java, format))
-        }.getOrDefault(false)
-
-        if (supported(base)) return base
-        for (rate in DEVICE_RATES) {
-            val candidate = AudioFormat(
-                base.encoding,
-                rate,
-                base.sampleSizeInBits,
-                base.channels,
-                base.channels * (base.sampleSizeInBits / 8),
-                rate,
-                base.isBigEndian,
-            )
-            if (supported(candidate)) return candidate
+    private fun openOutput(source: AudioInputStream): OutputChoice {
+        var lastFailure: Throwable? = null
+        for ((stream, format) in outputCandidates(source)) {
+            try {
+                return OutputChoice(stream, format, openLine(format))
+            } catch (t: Throwable) {
+                lastFailure = t
+            }
         }
-        return base
+        throw lastFailure ?: IllegalStateException("no audio device")
     }
 
-    /** Forces 16-bit signed little-endian PCM, the one format every output device accepts. */
-    private fun pcmFormatFor(base: AudioFormat): AudioFormat {
-        val isPcm16 = base.encoding == AudioFormat.Encoding.PCM_SIGNED &&
-            base.sampleSizeInBits == 16 &&
-            !base.isBigEndian
-        if (isPcm16) return base
-        return AudioFormat(
-            AudioFormat.Encoding.PCM_SIGNED,
-            base.sampleRate,
-            16,
-            base.channels.coerceAtLeast(1),
-            base.channels.coerceAtLeast(1) * 2,
-            base.sampleRate,
-            false,
-        )
+    /**
+     * The stream/format pairs to try, best first.
+     *
+     * The file's own PCM format comes first, which is the path every ordinary track has always taken.
+     * Anything above [MAX_DEVICE_RATE_HZ] is deliberately never offered to the device: a mixer claims
+     * to support 384 kHz but does not actually play it at that rate, which is exactly the "high
+     * sample rate file fails" symptom, so those are converted down instead. The conversion uses Java
+     * Sound's own rate converter, and a target rate with no converter is simply skipped.
+     */
+    private fun outputCandidates(source: AudioInputStream): List<Pair<AudioInputStream, AudioFormat>> {
+        val basePcm = pcmFormatFor(source.format)
+        val baseStream = if (basePcm == source.format) source else convert(basePcm, source) ?: return emptyList()
+        val result = ArrayList<Pair<AudioInputStream, AudioFormat>>(DEVICE_RATES.size + 1)
+        for (format in outputFormatsFor(basePcm)) {
+            if (format == basePcm) {
+                result += baseStream to basePcm
+                continue
+            }
+            val converted = convert(format, baseStream) ?: continue
+            result += converted to format
+        }
+        return result
     }
+
+    /** Java Sound's conversion, or null when no installed provider supports this pair. */
+    private fun convert(format: AudioFormat, source: AudioInputStream): AudioInputStream? =
+        runCatching { AudioSystem.getAudioInputStream(format, source) }.getOrNull()
 
     private companion object {
         const val BUFFER_BYTES = 64 * 1024
-
-        /**
-         * Rates tried when the device refuses the file's own rate. 48 kHz first because it is what
-         * every Windows mixer has supported for two decades; 44.1 kHz is the fallback for a device
-         * that only speaks CD audio.
-         */
-        val DEVICE_RATES = floatArrayOf(48_000f, 44_100f)
     }
+}
+
+/**
+ * Rates tried when the device refuses the file's own rate. 48 kHz first because it is what every
+ * Windows mixer has supported for two decades; 44.1 kHz is the fallback for a device that only
+ * speaks CD audio.
+ */
+internal val DEVICE_RATES = floatArrayOf(48_000f, 44_100f)
+
+/**
+ * Nothing above this is ever handed to the device. Windows mixers report support well beyond what
+ * they render (the probe answered `true` even for 384 kHz), and a rate the hardware silently
+ * mishandles is worse than one Java Sound converts for us.
+ */
+internal const val MAX_DEVICE_RATE_HZ = 192_000f
+
+/**
+ * The output formats to try for [base], best first.
+ *
+ * The file's own format comes first when the device can plausibly take it, which is the path every
+ * ordinary track has always taken. Anything above [MAX_DEVICE_RATE_HZ] is deliberately never offered:
+ * that is the "192 kHz and up fails" symptom, because a mixer claims to support 384 kHz but does not
+ * actually play it at that rate.
+ */
+internal fun outputFormatsFor(base: AudioFormat): List<AudioFormat> {
+    val result = ArrayList<AudioFormat>(DEVICE_RATES.size + 1)
+    if (base.frameRate <= MAX_DEVICE_RATE_HZ) result += base
+    for (rate in DEVICE_RATES) {
+        if (rate == base.frameRate) continue
+        result += rateFormat(base, rate)
+    }
+    return result
+}
+
+/** A copy of [base] at [rate] as 16-bit signed little-endian PCM. */
+internal fun rateFormat(base: AudioFormat, rate: Float): AudioFormat = AudioFormat(
+    AudioFormat.Encoding.PCM_SIGNED,
+    rate,
+    16,
+    base.channels.coerceAtLeast(1),
+    base.channels.coerceAtLeast(1) * 2,
+    rate,
+    false,
+)
+
+/** Forces 16-bit signed little-endian PCM, the one format every output device accepts. */
+internal fun pcmFormatFor(base: AudioFormat): AudioFormat {
+    val isPcm16 = base.encoding == AudioFormat.Encoding.PCM_SIGNED &&
+        base.sampleSizeInBits == 16 &&
+        !base.isBigEndian
+    if (isPcm16) return base
+    return AudioFormat(
+        AudioFormat.Encoding.PCM_SIGNED,
+        base.sampleRate,
+        16,
+        base.channels.coerceAtLeast(1),
+        base.channels.coerceAtLeast(1) * 2,
+        base.sampleRate,
+        false,
+    )
 }

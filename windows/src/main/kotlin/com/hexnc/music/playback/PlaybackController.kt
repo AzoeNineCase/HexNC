@@ -2,6 +2,7 @@ package com.hexnc.music.playback
 
 import android.content.Context
 import android.net.Uri
+import com.hexnc.music.data.local.dsd.DsdProbe
 import com.hexnc.music.data.local.isDsdSource
 import com.hexnc.music.data.model.Song
 import com.hexnc.music.data.model.SongSource
@@ -181,12 +182,18 @@ class PlaybackController(
         val items = songs.filter { song ->
             when (song.source) {
                 SongSource.LOCAL -> {
-                    // Java Sound has no DSD decoder, so a `.dsf`/`.dff` file would reach it and come
-                    // back as an opaque decode error a second later. Refusing it here turns that into
-                    // a message the user can act on, and lets the rest of the queue keep playing.
+                    // DSF/DFF is decoded by the bundled Java Sound provider, so it plays like any
+                    // other file. Only a container that cannot be decoded — DST compression, or a
+                    // malformed header — is dropped here, which is what keeps one unplayable file
+                    // from failing the rest of the queue.
                     if (isDsdSource(song.localPath ?: song.mediaUri)) {
-                        dsdSkipped++
-                        false
+                        val file = localFileOf(song)
+                        if (file == null || !DsdProbe.canDecode(file.absolutePath)) {
+                            dsdSkipped++
+                            false
+                        } else {
+                            true
+                        }
                     } else {
                         localFileOf(song) != null
                     }
@@ -366,6 +373,9 @@ class PlaybackController(
         engine?.release()
         engine = null
         _current.value = song
+        // Remembered here rather than when the engine reports "started": a track that fails to
+        // download still opened, and the history is what the user just asked to play.
+        settings.addRecentlyPlayedId(song.id)
         pushSnapshot()
 
         loadJob?.cancel()

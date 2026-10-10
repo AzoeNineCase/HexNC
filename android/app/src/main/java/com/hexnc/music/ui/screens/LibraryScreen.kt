@@ -73,8 +73,16 @@ import top.yukonga.miuix.kmp.utils.PressFeedbackType
 private const val SECTION_LIMIT = 6
 
 /**
- * The library tab: a scale summary, the recent shelf, the liked shelf, then the album and artist
- * indexes, with the import entry points behind a single app-bar icon.
+ * How many rows each recent shelf shows.
+ *
+ * Deliberately shorter than [SECTION_LIMIT]: the library tab is a launch pad, not a history page —
+ * everything past these rows is one tap away through the album and artist indexes, or the search tab.
+ */
+private const val RECENT_SHELF_LIMIT = 4
+
+/**
+ * The library tab: a scale summary, the play-history shelf, the recently-added shelf, the liked
+ * shelf, then the album and artist indexes, with the import entry points behind one app-bar icon.
  */
 @Composable
 fun LibraryScreen(
@@ -85,10 +93,12 @@ fun LibraryScreen(
     val strings = LocalStrings.current
     val revision by container.library.revision.collectAsStateWithLifecycle()
     val session by container.netease.session.collectAsStateWithLifecycle()
+    val settingsState by container.settings.state.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
 
     var stats by remember { mutableStateOf<LibraryStats?>(null) }
     var songs by remember { mutableStateOf<List<Song>>(emptyList()) }
+    var recentlyPlayed by remember { mutableStateOf<List<Song>>(emptyList()) }
     var albums by remember { mutableStateOf<List<AlbumGroup>>(emptyList()) }
     var artists by remember { mutableStateOf<List<ArtistGroup>>(emptyList()) }
     var playlists by remember { mutableStateOf<List<Playlist>>(emptyList()) }
@@ -104,6 +114,9 @@ fun LibraryScreen(
     suspend fun reload() {
         stats = container.library.libraryStats()
         songs = container.library.songs(limit = SECTION_LIMIT * 3)
+        // The history is a list of ids this device remembers; deleted or unimported ids simply drop
+        // out of the lookup, so the shelf never shows a row that cannot be played.
+        recentlyPlayed = container.library.recentlyPlayed(container.settings.current.recentlyPlayedIds)
         albums = container.library.albums()
         artists = container.library.artists()
         playlists = container.library.playlists()
@@ -111,6 +124,13 @@ fun LibraryScreen(
     }
 
     LaunchedEffect(revision) { reload() }
+
+    // Play history lives in preferences, not in the database, so it is not covered by [revision]:
+    // without this key, playing a track and coming back would show a stale shelf. It is keyed on the
+    // id list alone so that an unrelated preference change does not reload the whole tab.
+    LaunchedEffect(settingsState.recentlyPlayedIds) {
+        recentlyPlayed = container.library.recentlyPlayed(settingsState.recentlyPlayedIds)
+    }
 
     // Deliberately not part of reload(): the sync bumps the revision reload is keyed on, so doing it
     // there would reschedule itself forever. Once per screen instance is enough to backfill a device
@@ -257,8 +277,25 @@ fun LibraryScreen(
                             }
                         }
 
+                        if (recentlyPlayed.isNotEmpty()) {
+                            item(key = "played-header") { SectionHeader(strings.recentlyPlayed) }
+                            items(recentlyPlayed.take(RECENT_SHELF_LIMIT), key = { "played-" + it.id }) { song ->
+                                SongRow(
+                                    song = song,
+                                    strings = strings,
+                                    onClick = {
+                                        playFrom(recentlyPlayed, recentlyPlayed.indexOf(song).coerceAtLeast(0))
+                                    },
+                                    onLongClick = {
+                                        actionsSong = song
+                                        showActions = true
+                                    },
+                                )
+                            }
+                        }
+
                         item(key = "recent-header") { SectionHeader(strings.recentlyAdded) }
-                        items(all.take(SECTION_LIMIT), key = { "recent-" + it.id }) { song ->
+                        items(all.take(RECENT_SHELF_LIMIT), key = { "recent-" + it.id }) { song ->
                             SongRow(
                                 song = song,
                                 strings = strings,

@@ -25,6 +25,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hexnc.music.data.model.Playlist
 import com.hexnc.music.data.model.PlaylistSource
+import com.hexnc.music.data.netease.NcAlbum
 import com.hexnc.music.di.AppContainer
 import com.hexnc.music.ui.HexScaffold
 import com.hexnc.music.ui.Route
@@ -54,7 +55,9 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
  * The playlists tab.
  *
  * Local and NetEase playlists share one list type, so they are rendered as two labelled sections
- * rather than two screens; the row already carries the source through its cover and subtitle.
+ * rather than two screens; the row already carries the source through its cover and subtitle. The
+ * albums favourited on NetEase are listed under them as a third section — they are a browse surface
+ * rather than a library this app owns, so one is imported only when the user opens it.
  */
 @Composable
 fun PlaylistsScreen(
@@ -74,6 +77,8 @@ fun PlaylistsScreen(
     var newName by remember { mutableStateOf("") }
     var syncing by remember { mutableStateOf(false) }
     var syncLine by remember { mutableStateOf("") }
+    var favAlbums by remember { mutableStateOf<List<NcAlbum>>(emptyList()) }
+    var importingAlbum by remember { mutableStateOf(false) }
 
     suspend fun reload() {
         local = container.library.playlistsOf(PlaylistSource.LOCAL)
@@ -82,6 +87,18 @@ fun PlaylistsScreen(
     }
 
     LaunchedEffect(revision) { reload() }
+
+    // Album favourites are a service read, so they are deliberately kept outside [reload]: the tab
+    // shows the playlists it already has instead of holding the screen on a round trip. A failed read
+    // keeps the previous list rather than blanking the section — the service answering badly for a
+    // moment is not a reason to make the user's albums disappear.
+    LaunchedEffect(session.isSignedIn, revision) {
+        favAlbums = if (session.isSignedIn) {
+            container.netease.favouriteAlbums().getOrElse { favAlbums }
+        } else {
+            emptyList()
+        }
+    }
 
     fun message(text: String) {
         scope.launch { snackbarHostState.showSnackbar(text) }
@@ -99,6 +116,26 @@ fun PlaylistsScreen(
                 .onSuccess { report -> message("${strings.syncDone} · ${strings.songs(report.tracks)}") }
                 .onFailure { message(strings.syncFailed) }
             container.library.notifyExternalChange()
+        }
+    }
+
+    /**
+     * Opens a favourited album: materialise its tracks, then show it as an ordinary local album.
+     *
+     * The album page is a local-library screen, so importing first is what makes it playable; an
+     * album the service will not hand over is reported rather than opening a page whose rows fail.
+     */
+    fun openAlbum(album: NcAlbum) {
+        if (importingAlbum) return
+        scope.launch {
+            importingAlbum = true
+            val count = container.netease.importAlbum(album.id).getOrDefault(0)
+            importingAlbum = false
+            if (count > 0) {
+                onNavigate(Route.AlbumDetail(album.name, album.artistName))
+            } else {
+                message(strings.networkError)
+            }
         }
     }
 
@@ -135,7 +172,7 @@ fun PlaylistsScreen(
         Box(modifier = Modifier.fillMaxWidth().padding(top = padding.calculateTopPadding())) {
             when {
                 !loaded -> LoadingBox()
-                local.isEmpty() && remote.isEmpty() -> EmptyState(
+                local.isEmpty() && remote.isEmpty() && favAlbums.isEmpty() -> EmptyState(
                     title = strings.playlistEmpty,
                     body = strings.emptyPlaylistHint,
                     actionLabel = strings.createPlaylist,
@@ -199,6 +236,28 @@ fun PlaylistsScreen(
                                 body = strings.signInSubtitle,
                                 actionLabel = strings.signInNetease,
                                 onAction = { onNavigate(Route.SignIn) },
+                            )
+                        }
+                    }
+
+                    if (favAlbums.isNotEmpty()) {
+                        item(key = "nc-album-header") { SectionHeader(strings.neteaseAlbums) }
+                        items(favAlbums, key = { "nc-album-" + it.id }) { album ->
+                            CollectionRow(
+                                title = album.name,
+                                subtitle = album.artistName.ifBlank { null },
+                                coverUrl = album.picUrl,
+                                overridePath = null,
+                                strings = strings,
+                                count = album.size,
+                                onClick = { openAlbum(album) },
+                            )
+                        }
+                    } else if (session.isSignedIn) {
+                        item(key = "nc-album-empty") {
+                            EmptyState(
+                                title = strings.neteaseAlbums,
+                                body = strings.neteaseAlbumsEmpty,
                             )
                         }
                     }

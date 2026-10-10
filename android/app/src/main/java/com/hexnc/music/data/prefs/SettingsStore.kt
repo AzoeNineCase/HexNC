@@ -67,6 +67,14 @@ data class AppSettings(
     // Library
     val lastTab: String = "library",
     val recentSearches: List<String> = emptyList(),
+    /**
+     * Song ids, most recently played first.
+     *
+     * Kept here rather than in the database on purpose: play order is a per-device convenience, and
+     * storing it in `songs` would have forced a library migration on every existing install for
+     * something that is allowed to be forgotten.
+     */
+    val recentlyPlayedIds: List<String> = emptyList(),
     val neteaseCookiePersisted: Boolean = false,
     val onboardingDone: Boolean = false
 )
@@ -122,6 +130,11 @@ class SettingsStore(context: Context) {
             ?.split(SEARCH_SEP)
             ?.filter { it.isNotBlank() }
             ?.take(12)
+            ?: emptyList(),
+        recentlyPlayedIds = prefs.getString(KEY_RECENT_PLAYED, null)
+            ?.split(SEARCH_SEP)
+            ?.filter { it.isNotBlank() }
+            ?.take(RECENT_PLAYED_MAX)
             ?: emptyList(),
         neteaseCookiePersisted = prefs.getBoolean(KEY_COOKIE_PERSISTED, false),
         onboardingDone = prefs.getBoolean(KEY_ONBOARDING, false)
@@ -185,9 +198,24 @@ class SettingsStore(context: Context) {
 
     fun clearRecentSearches() = mutate { remove(KEY_RECENT_SEARCHES) }
 
+    /**
+     * Moves a song to the front of the play history, keeping at most [RECENT_PLAYED_MAX] entries.
+     *
+     * Re-playing something already in the list re-orders it instead of duplicating it, which is what
+     * makes the shelf on the library screen read as "what I have been listening to" rather than a log.
+     */
+    fun addRecentlyPlayedId(id: String) {
+        if (id.isBlank()) return
+        val next = (listOf(id) + current.recentlyPlayedIds.filterNot { it == id }).take(RECENT_PLAYED_MAX)
+        mutate { putString(KEY_RECENT_PLAYED, next.joinToString(SEARCH_SEP)) }
+    }
+
+    fun clearRecentlyPlayed() = mutate { remove(KEY_RECENT_PLAYED) }
+
     companion object {
         private const val PREFS_NAME = "hexnc_settings"
         private const val SEARCH_SEP = "\u0001"
+        private const val RECENT_PLAYED_MAX = 24
 
         private const val KEY_LANGUAGE = "language"
         private const val KEY_THEME_MODE = "theme_mode"
@@ -208,6 +236,7 @@ class SettingsStore(context: Context) {
         private const val KEY_SKIP_ERROR = "skip_on_error"
         private const val KEY_LAST_TAB = "last_tab"
         private const val KEY_RECENT_SEARCHES = "recent_searches"
+        private const val KEY_RECENT_PLAYED = "recently_played"
         private const val KEY_COOKIE_PERSISTED = "netease_cookie_persisted"
         private const val KEY_ONBOARDING = "onboarding_done"
     }

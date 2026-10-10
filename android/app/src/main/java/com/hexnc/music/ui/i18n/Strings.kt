@@ -94,6 +94,7 @@ class Strings(val language: Language) {
     val folders get() = p("文件夹", "Folders")
     val favorites get() = p("我喜欢的音乐", "Liked songs")
     val recentlyAdded get() = p("最近添加", "Recently added")
+    val recentlyPlayed get() = p("最近播放", "Recently played")
     val localMusic get() = p("本地音乐", "Local music")
     val neteaseMusic get() = p("网易云音乐", "NetEase Cloud Music")
     val sourceAll get() = p("全部来源", "All sources")
@@ -126,6 +127,8 @@ class Strings(val language: Language) {
     val playlistsTitle get() = p("歌单", "Playlists")
     val myPlaylists get() = p("我的歌单", "My playlists")
     val neteasePlaylists get() = p("网易云歌单", "NetEase playlists")
+    val neteaseAlbums get() = p("网易云专辑", "NetEase albums")
+    val neteaseAlbumsEmpty get() = p("在网易云收藏的专辑会显示在这里", "Albums you favourite on NetEase appear here")
     val createPlaylist get() = p("新建歌单", "New playlist")
     val playlistName get() = p("歌单名称", "Playlist name")
     val playlistNameHint get() = p("给这个歌单起个名字", "Name this playlist")
@@ -358,6 +361,7 @@ class Strings(val language: Language) {
     val pause get() = p("暂停", "Pause")
     val previous get() = p("上一首", "Previous")
     val next get() = p("下一首", "Next")
+    val moreActions get() = p("更多操作", "More actions")
     val shuffle get() = p("随机", "Shuffle")
     val repeatSequence get() = p("顺序播放", "Play in order")
     val repeatAll get() = p("列表循环", "Repeat all")
@@ -409,13 +413,14 @@ class Strings(val language: Language) {
         "Playback failed: the audio file is missing — it may have been moved or deleted, or the app lost access to it",
     )
     val playbackUnsupported get() = p(
-        "播放失败：系统或应用不支持该音频格式（例如 DSD、超高采样率）",
-        "Playback failed: Android or the app does not support this audio format (e.g. DSD, extreme sample rates)",
+        "播放失败：系统或应用不支持该音频格式（例如超高采样率、受保护的音频）",
+        "Playback failed: Android or the app does not support this audio format (e.g. extreme sample rates, protected audio)",
     )
     val playbackDsd get() = p(
-        "DSD 格式（.dsf/.dff）暂不支持播放，已跳过",
-        "DSD (.dsf/.dff) is not supported yet and was skipped",
+        "该 DSD 文件无法解码（暂不支持 DST 压缩的 DSD），已跳过",
+        "This DSD file could not be decoded (DST-compressed DSD is not supported) and was skipped",
     )
+    val playbackDsdDecoding get() = p("正在解码 DSD…", "Decoding DSD…")
     val currentTrack get() = p("当前播放", "Now playing")
     val removeFromQueue get() = p("从队列中移除", "Remove from the queue")
 

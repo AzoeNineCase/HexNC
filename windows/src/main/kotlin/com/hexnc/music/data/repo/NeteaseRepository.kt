@@ -11,6 +11,7 @@ import com.hexnc.music.data.model.Playlist
 import com.hexnc.music.data.model.PlaylistSource
 import com.hexnc.music.data.model.Song
 import com.hexnc.music.data.model.SongSource
+import com.hexnc.music.data.netease.NcAlbum
 import com.hexnc.music.data.netease.NeteaseApi
 import com.hexnc.music.data.netease.NeteaseClient
 import com.hexnc.music.data.netease.NeteaseCookieStore
@@ -693,6 +694,19 @@ class NeteaseRepository(
                 library.notifyExternalChange()
                 ncSongs.size
             }
+        }
+
+    /**
+     * The albums the signed-in account has favourited, newest first.
+     *
+     * Pulled as one generous paced page rather than by following `hasMore` down a dozen of them: a
+     * sublist is a browse surface, and a single read is both cheaper and kinder to a service that
+     * answers bursts with a zero-byte 200. Nothing is written to the database here — the caller
+     * imports an album only when the user opens it.
+     */
+    suspend fun favouriteAlbums(limit: Int = 200): Result<List<NcAlbum>> =
+        withContext(Dispatchers.IO) {
+            runCatching { paced { api.albumSublist(limit = limit) }.albums.take(limit) }
         }
 
     /** Adds the current top songs of a NetEase artist to the local library. */

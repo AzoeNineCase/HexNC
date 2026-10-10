@@ -21,6 +21,10 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -56,12 +60,14 @@ import com.hexnc.music.ui.components.Caption
 import com.hexnc.music.ui.components.CoverArt
 import com.hexnc.music.ui.components.EmptyState
 import com.hexnc.music.ui.components.LyricSearchSheet
+import com.hexnc.music.ui.components.MAX_LIST_WIDTH
 import com.hexnc.music.ui.components.formatDuration
 import com.hexnc.music.ui.i18n.LocalStrings
 import com.hexnc.music.ui.i18n.Strings
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.basic.BasicComponent
+import top.yukonga.miuix.kmp.basic.HorizontalDivider
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.IconButton
 import top.yukonga.miuix.kmp.basic.Scaffold
@@ -71,6 +77,7 @@ import top.yukonga.miuix.kmp.basic.SnackbarHost
 import top.yukonga.miuix.kmp.basic.SnackbarHostState
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
+import top.yukonga.miuix.kmp.basic.VerticalDivider
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Back
 import top.yukonga.miuix.kmp.icon.extended.ChevronBackward
@@ -86,7 +93,11 @@ import top.yukonga.miuix.kmp.overlay.OverlayBottomSheet
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 private const val COVER_SIZE = 268
+private const val COMPACT_COVER_SIZE = 196
 private const val QUEUE_MAX_HEIGHT = 430
+
+/** Window width from which the player and the lyrics sit side by side instead of stacked. */
+private val WIDE_PLAYER_MIN_WIDTH = 900.dp
 
 /** How long a manual scroll suspends auto-follow before the sheet re-centres itself. */
 private const val LYRIC_FOLLOW_RESUME_MS = 5_000L
@@ -97,9 +108,9 @@ private const val LYRIC_CLOCK_SMOOTH_MS = 320
 /**
  * Full-screen player.
  *
- * Two panes share one top bar: artwork + transport, and the scrolling lyric sheet. They are switched
- * rather than stacked because the lyric view wants the whole height for long lines, and a
- * half-height lyric strip would need its own scroll arbitration against the page scroll.
+ * Artwork, transport and lyrics live on this one page. A wide window shows them side by side; a
+ * narrow one stacks the transport above the lyrics, so the lyrics are always part of the playback
+ * detail page rather than a pane that replaces it.
  *
  * Owns its own [Scaffold] for the same reason every pushed screen does: Miuix `Overlay*` popups
  * resolve against the nearest host scaffold.
@@ -114,7 +125,7 @@ fun NowPlayingScreen(container: AppContainer, onBack: () -> Unit) {
 
     val snackbarHostState = remember { SnackbarHostState() }
     var showQueue by remember { mutableStateOf(false) }
-    var showLyrics by remember { mutableStateOf(false) }
+    var showLyrics by remember { mutableStateOf(true) }
 
     Scaffold(
         topBar = {
@@ -170,36 +181,87 @@ fun NowPlayingScreen(container: AppContainer, onBack: () -> Unit) {
                         .padding(padding)
                         .padding(horizontal = 32.dp),
                 )
-            } else if (showLyrics) {
-                LyricsPane(
-                    container = container,
-                    song = track,
-                    strings = strings,
-                    positionMs = snapshot.positionMs,
-                    fontSizeSp = settings.lyricFontSizeSp,
-                    lineSpacing = settings.lyricLineSpacing,
-                    translationScale = settings.lyricTranslationScale,
-                    showTranslation = settings.lyricShowTranslation,
-                    onSeek = { container.playback.seekTo(it) },
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(padding),
-                )
             } else {
-                PlayerPane(
-                    container = container,
-                    song = track,
-                    strings = strings,
-                    isPlaying = snapshot.isPlaying,
-                    positionMs = snapshot.positionMs,
-                    durationMs = snapshot.durationMs,
-                    playMode = snapshot.playMode,
-                    hasPrevious = snapshot.hasPrevious,
-                    hasNext = snapshot.hasNext,
+                BoxWithConstraints(
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(padding),
-                )
+                ) {
+                    val player: @Composable (Modifier, Boolean) -> Unit = { paneModifier, compact ->
+                        PlayerPane(
+                            container = container,
+                            song = track,
+                            strings = strings,
+                            isPlaying = snapshot.isPlaying,
+                            positionMs = snapshot.positionMs,
+                            durationMs = snapshot.durationMs,
+                            playMode = snapshot.playMode,
+                            hasPrevious = snapshot.hasPrevious,
+                            hasNext = snapshot.hasNext,
+                            compact = compact,
+                            modifier = paneModifier,
+                        )
+                    }
+                    val lyrics: @Composable (Modifier) -> Unit = { paneModifier ->
+                        LyricsPane(
+                            container = container,
+                            song = track,
+                            strings = strings,
+                            positionMs = snapshot.positionMs,
+                            fontSizeSp = settings.lyricFontSizeSp,
+                            lineSpacing = settings.lyricLineSpacing,
+                            translationScale = settings.lyricTranslationScale,
+                            showTranslation = settings.lyricShowTranslation,
+                            onSeek = { container.playback.seekTo(it) },
+                            modifier = paneModifier,
+                        )
+                    }
+                    if (maxWidth >= WIDE_PLAYER_MIN_WIDTH) {
+                        // Capped at the same measure as the list tabs and centred: otherwise, on a
+                        // wide window, the player would spread to the window edges while every other
+                        // screen kept its content column in the middle, and the two would disagree
+                        // about where "the left edge" is when switching tabs.
+                        Box(
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = Alignment.TopCenter,
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .widthIn(max = MAX_LIST_WIDTH)
+                                    .fillMaxWidth()
+                                    .fillMaxHeight(),
+                            ) {
+                                player(Modifier.weight(1f).fillMaxHeight(), false)
+                                if (showLyrics) {
+                                    VerticalDivider(
+                                        modifier = Modifier
+                                            .fillMaxHeight()
+                                            .width(1.dp)
+                                            .padding(vertical = 28.dp),
+                                        color = MiuixTheme.colorScheme.outline,
+                                    )
+                                    lyrics(Modifier.weight(1f).fillMaxHeight())
+                                }
+                            }
+                        }
+                    } else {
+                        Column(modifier = Modifier.fillMaxSize()) {
+                            player(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .weight(if (showLyrics) 0.56f else 1f),
+                                true,
+                            )
+                            if (showLyrics) {
+                                HorizontalDivider(
+                                    modifier = Modifier.padding(horizontal = 28.dp),
+                                    color = MiuixTheme.colorScheme.outline,
+                                )
+                                lyrics(Modifier.fillMaxWidth().weight(0.44f))
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -232,6 +294,7 @@ private fun PlayerPane(
     playMode: PlayMode,
     hasPrevious: Boolean,
     hasNext: Boolean,
+    compact: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     // While the thumb is held the slider follows the finger; the playhead keeps advancing underneath.
@@ -244,17 +307,17 @@ private fun PlayerPane(
     Column(
         modifier = modifier
             .verticalScroll(rememberScrollState())
-            .padding(horizontal = 24.dp),
+            .padding(horizontal = if (compact) 20.dp else 40.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Spacer(Modifier.height(20.dp))
+        Spacer(Modifier.height(if (compact) 12.dp else 28.dp))
         CoverArt(
             coverUrl = song.coverUrl,
             overridePath = song.coverOverridePath,
-            size = COVER_SIZE.dp,
-            corner = 26.dp,
+            size = (if (compact) COMPACT_COVER_SIZE else COVER_SIZE).dp,
+            corner = if (compact) 20.dp else 26.dp,
         )
-        Spacer(Modifier.height(28.dp))
+        Spacer(Modifier.height(if (compact) 18.dp else 28.dp))
         Text(
             text = song.title,
             style = MiuixTheme.textStyles.title4,
