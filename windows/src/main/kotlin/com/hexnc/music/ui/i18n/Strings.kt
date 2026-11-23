@@ -80,6 +80,8 @@ class Strings(val language: Language) {
 
     fun playlists(count: Int) = p("$count 个歌单", if (count == 1) "1 playlist" else "$count playlists")
 
+    fun albums(count: Int) = p("$count 张专辑", if (count == 1) "1 album" else "$count albums")
+
     // ------------------------------------------------------------------ navigation
     val tabLibrary get() = p("音乐库", "Library")
     val tabPlaylists get() = p("歌单", "Playlists")
@@ -95,6 +97,7 @@ class Strings(val language: Language) {
     val favorites get() = p("我喜欢的音乐", "Liked songs")
     val recentlyAdded get() = p("最近添加", "Recently added")
     val recentlyPlayed get() = p("最近播放", "Recently played")
+    val browse get() = p("浏览", "Browse")
     val localMusic get() = p("本地音乐", "Local music")
     val neteaseMusic get() = p("网易云音乐", "NetEase Cloud Music")
     val sourceAll get() = p("全部来源", "All sources")
@@ -152,6 +155,15 @@ class Strings(val language: Language) {
     fun importedLibrary(playlists: Int, tracks: Int) =
         p("已导入 $playlists 个歌单 · $tracks 首歌曲", "Imported $playlists playlists · $tracks tracks")
     val lastSynced get() = p("上次同步", "Last synced")
+
+    /** `%s` is an already-formatted timestamp, e.g. "11-23 19:10". */
+    fun lastSyncedAt(formatted: String) = p("上次同步 $formatted", "Last synced $formatted")
+
+    /** One-line result summary after a sync: albums pulled, playlists skipped as unchanged, failures. */
+    fun syncSummary(albums: Int, skipped: Int, failed: Int): String {
+        val base = p("专辑 $albums 张 · 跳过 $skipped 个歌单", "$albums albums · $skipped playlists skipped")
+        return if (failed > 0) base + p(" · $failed 项失败", " · $failed failed") else base
+    }
     val neverSynced get() = p("尚未同步", "Never synced")
     val createdBy get() = p("创建者", "Created by")
     val trackCount get() = p("歌曲数", "Tracks")
@@ -221,7 +233,34 @@ class Strings(val language: Language) {
     val qualityExhigh get() = p("极高", "Very high")
     val qualityLossless get() = p("无损", "Lossless")
     val qualityHires get() = p("Hi-Res", "Hi-Res")
-    val qualityHintNetease get() = p("仅对网易云在线歌曲生效；实际音质取决于账号权限。", "Applies to NetEase streams only; the actual tier depends on your account.")
+    val qualityHintNetease get() = p(
+        "仅对网易云在线歌曲生效；默认请求 Hi-Res，实际拿到的档位会显示在播放页。",
+        "Applies to NetEase streams only; Hi-Res is requested by default and the tier actually " +
+            "granted is shown on the player.",
+    )
+
+    /**
+     * The tier the service actually granted, e.g. `FLAC · 1039 kbps`.
+     *
+     * Shown on the player because "I asked for Hi-Res" and "I am hearing Hi-Res" are different
+     * statements: NetEase answers a Hi-Res request with whatever the account and the track's
+     * copyright allow, and claiming otherwise would be a lie in the interface.
+     */
+    fun qualityChip(container: String, kbps: Int): String =
+        p("${container.uppercase()} · $kbps kbps", "${container.uppercase()} · $kbps kbps")
+
+    /** Appended to [qualityChip] when the granted tier was below lossless. */
+    val qualityBelowLossless get() = p("无无损版权", "no lossless master")
+
+    /** One line of the download panel summarising what landed: `2 FLAC · 1 MP3`. */
+    fun downloadFormats(formats: Map<String, Int>): String =
+        formats.entries.sortedByDescending { it.value }
+            .joinToString(" · ") { (extension, count) -> "${extension.uppercase()} ×$count" }
+
+    /** Shown in the download panel when some tracks had no lossless master. */
+    fun downloadBelowLossless(count: Int): String =
+        p("其中 $count 首没有无损版权", "$count of them had no lossless master")
+
     val crossfade get() = p("淡入淡出", "Crossfade")
     val crossfadeOff get() = p("关闭", "Off")
     fun seconds(value: Int) = p("$value 秒", "$value s")
@@ -237,9 +276,14 @@ class Strings(val language: Language) {
     val lyricFontSize get() = p("歌词文字大小", "Lyric text size")
     val lyricTranslation get() = p("显示翻译", "Show translation")
     val lyricRoman get() = p("显示罗马音", "Show romanisation")
+    val lyricRomanScale get() = p("罗马音字号", "Romaji size")
+    val noRomanYet get() = p("暂无罗马音", "No romaji available")
     val lyricLineSpacing get() = p("行距", "Line spacing")
     val lyricPreviewText get() = p("极光掠过山脊，夜色缓缓退去", "Aurora over the ridge, the night draws back")
     val lyricPreviewTrans get() = p("预览歌词效果", "Lyric preview")
+    // Romanisation is language-independent, so this one is not a p(...) pair: the preview line is the
+// pinyin of the Chinese preview above it.
+    val lyricPreviewRoman get() = "jí guāng lüè guò shān jǐ, yè sè huǎn huǎn tuì qù"
 
     val librarySection get() = p("音乐库", "Library")
     val rescanLocal get() = p("重新扫描本地音乐", "Rescan local music")
@@ -379,6 +423,9 @@ class Strings(val language: Language) {
     val queueEmpty get() = p("播放队列为空", "The queue is empty")
     val clearQueue get() = p("清空队列", "Clear the queue")
     val nowPlayingLyrics get() = p("歌词", "Lyrics")
+    val playerOptions get() = p("播放选项", "Playback options")
+    val immersive get() = p("沉浸模式", "Immersive mode")
+    val immersiveHint get() = p("只显示封面和歌词，轻点封面退出", "Artwork and lyrics only — tap the cover to exit")
     val noLyrics get() = p("暂无歌词", "No lyrics")
     val pureMusic get() = p("纯音乐，请欣赏", "Instrumental — enjoy the music")
     val uncollectedLyrics get() = p("歌词尚未收录", "Lyrics not collected yet")
@@ -433,6 +480,35 @@ class Strings(val language: Language) {
         "This DSD file (.dsf/.dff) could not be decoded and was skipped; DST-compressed DSD is not supported",
     )
     val playbackDsdDecoding get() = p("正在解码 DSD…", "Decoding DSD…")
+    val playbackUnsupportedFormat get() = p(
+        "播放失败：暂不支持该音频格式（Opus、WMA、DST 压缩的 DSD）",
+        "Playback failed: this audio format is not supported yet (Opus, WMA, DST-compressed DSD)",
+    )
+    val playbackDecodeError get() = p(
+        "播放失败：文件已损坏，或解码器读不了这段音频",
+        "Playback failed: the file is damaged, or the decoder could not read this audio",
+    )
+    val playbackDeviceError get() = p(
+        "播放失败：打不开音频输出设备，请检查系统输出设备后重试",
+        "Playback failed: the audio output device would not open — check the system output device and try again",
+    )
+    val playbackAccessError get() = p(
+        "播放失败：没有读取该文件的权限，它可能在受保护目录或已断开的外部磁盘上",
+        "Playback failed: no permission to read the file — it may be in a protected folder or on a disconnected drive",
+    )
+    val unsupportedBadge get() = p("不支持", "Unsupported")
+    val unsupportedOpus get() = p(
+        "暂不支持 Opus 音频（缺少纯 Java 解码器）",
+        "Opus audio is not supported yet (no pure-Java decoder is bundled)",
+    )
+    val unsupportedWma get() = p(
+        "暂不支持 WMA 音频（微软编码器无法在应用内使用）",
+        "WMA audio is not supported yet (the Microsoft codec is not available inside the app)",
+    )
+    val unsupportedDst get() = p(
+        "暂不支持 DST 压缩的 DSD",
+        "DST-compressed DSD is not supported yet",
+    )
 
 
     // ------------------------------------------------------------------ covers
@@ -488,6 +564,76 @@ class Strings(val language: Language) {
     val showAll get() = p("显示全部", "Show all")
     val collapse get() = p("收起", "Collapse")
     val countSongs get() = p("歌曲", "Tracks")
+
+    // ------------------------------------------------------------------ song info
+    val songInfo get() = p("歌曲信息", "Song info")
+    val trackNumber get() = p("音轨", "Track")
+    val fileFormat get() = p("格式", "Format")
+    val fileSize get() = p("文件大小", "File size")
+    val filePath get() = p("文件路径", "File path")
+    val addedAtLabel get() = p("添加时间", "Added")
+    val lyricsAvailable get() = p("歌词", "Lyrics")
+    val localFile get() = p("本地文件", "Local file")
+    val onlineStream get() = p("网易云在线", "NetEase stream")
+    val yes get() = p("有", "Yes")
+    val no get() = p("无", "No")
+
+    // ------------------------------------------------------------------ downloads
+    val download get() = p("下载", "Download")
+    val downloadSummaryHint get() = p("保存到本地音乐库", "Save to this device")
+    val downloadAll get() = p("全部下载", "Download all")
+    val downloading get() = p("正在下载", "Downloading")
+    val downloadDone get() = p("下载结束", "Download finished")
+    val downloadCancel get() = p("取消下载", "Cancel download")
+    val downloadRetry get() = p("重试失败项", "Retry failed")
+    val downloadNothing get() = p("没有可下载的歌曲", "Nothing to download")
+    val downloadFailedAll get() = p("全部失败", "All failed")
+    val downloadSection get() = p("下载", "Downloads")
+    val downloadLevelHint get() = p(
+        "导出时向网易云请求的档位：默认 Hi-Res，会取到该曲目与账号允许的最高音质——有母带的存 FLAC" +
+            "（原生标签齐全），没有母带的自动回落到 320 kbps MP3，而不是改名冒充。",
+        "The tier requested when exporting. Defaults to Hi-Res, which takes the best the track " +
+            "and your account allow: tracks with a master are saved as FLAC with native tags, the " +
+            "rest fall back to 320 kbps MP3 instead of being renamed.",
+    )
+    val downloadEmbedCover get() = p("内嵌封面", "Embed cover art")
+    val downloadEmbedCoverHint get() = p(
+        "把封面写进 MP3 的 ID3 标签；FLAC 与 M4A 保持原样。",
+        "Writes the cover into the MP3 ID3 tag; FLAC and M4A files are left as they are.",
+    )
+    val downloadWriteLyric get() = p("同时保存歌词", "Save lyrics too")
+    val downloadWriteLyricHint get() = p(
+        "在音频文件旁写一个同名 .lrc。",
+        "Writes a .lrc file next to the audio file.",
+    )
+    val downloadFolder get() = p("下载目录", "Download folder")
+    val downloadFolderHint get() = p("留空则使用 音乐\\HexNC。", "Blank uses Music\\HexNC.")
+
+    fun downloadProgress(done: Int, total: Int) = p("$done / $total", "$done / $total")
+
+    fun downloadCounts(completed: Int, skipped: Int, failed: Int) = p(
+        "成功 $completed · 已存在 $skipped · 失败 $failed",
+        "$completed saved · $skipped already there · $failed failed",
+    )
+
+    fun downloadSavedTo(path: String) = p("已保存到 $path", "Saved to $path")
+
+    fun downloadError(error: com.hexnc.music.data.download.DownloadError): String = when (error) {
+        com.hexnc.music.data.download.DownloadError.NOT_SUPPORTED -> p(
+            "不是网易云歌曲，无法下载",
+            "Not a NetEase track — nothing to download",
+        )
+        com.hexnc.music.data.download.DownloadError.NO_COPYRIGHT -> p(
+            "无版权或该地区不可用",
+            "No copyright, or not available in this region",
+        )
+        com.hexnc.music.data.download.DownloadError.NO_TIER -> p(
+            "该音质没有可用音源",
+            "No source for this tier",
+        )
+        com.hexnc.music.data.download.DownloadError.NETWORK -> p("网络错误", "Network error")
+        com.hexnc.music.data.download.DownloadError.IO_FAILED -> p("写入失败", "Could not write the file")
+    }
 }
 
 /** Provides the active [Strings] to the composition. */

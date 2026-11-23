@@ -37,6 +37,7 @@ import com.hexnc.music.ui.components.LoadingBox
 import com.hexnc.music.ui.components.SectionHeader
 import com.hexnc.music.ui.components.SongRow
 import com.hexnc.music.ui.components.TrackActionsSheet
+import com.hexnc.music.ui.components.rememberLyricImporter
 import com.hexnc.music.ui.i18n.LocalStrings
 import com.hexnc.music.ui.i18n.Strings
 import kotlinx.coroutines.delay
@@ -115,6 +116,10 @@ fun SearchScreen(
     fun message(text: String) {
         scope.launch { snackbarHostState.showSnackbar(text) }
     }
+
+    // A local .lrc picked from a search result clears the deleted-lyrics tombstone first, so the
+    // import cannot silently do nothing for a song whose lyrics were removed once.
+    val importLyric = rememberLyricImporter(container, strings, ::message)
 
     HexScaffold(
         container = container,
@@ -242,7 +247,7 @@ fun SearchScreen(
                                         .getOrDefault(0)
                                     busy = false
                                     if (count > 0) {
-                                        onNavigate(Route.ArtistDetail(artist.name))
+                                        onNavigate(Route.ArtistDetail(artist.name, artist.id))
                                     } else {
                                         message(strings.networkError)
                                     }
@@ -277,7 +282,7 @@ fun SearchScreen(
             onDismissAddToPlaylist = { showAddToPlaylist = false },
             onOpenAddToPlaylist = { showAddToPlaylist = true },
             onSetCover = { message(strings.changeCover) },
-            onImportLyric = { message(strings.importFromFiles) },
+            onImportLyric = { actionsSong?.id?.let(importLyric) },
             onDeleted = { message(strings.delete) },
         )
     }

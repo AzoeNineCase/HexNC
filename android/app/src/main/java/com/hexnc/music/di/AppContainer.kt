@@ -3,8 +3,12 @@ package com.hexnc.music.di
 import android.content.Context
 import com.hexnc.music.data.db.HexNCDatabase
 import com.hexnc.music.data.db.LyricDao
+import com.hexnc.music.data.db.NeteaseAlbumDao
 import com.hexnc.music.data.db.PlaylistDao
 import com.hexnc.music.data.db.SongDao
+import com.hexnc.music.data.download.AndroidDownloadSink
+import com.hexnc.music.data.download.DownloadManager
+import com.hexnc.music.data.download.SongDownloader
 import com.hexnc.music.data.local.CoverStore
 import com.hexnc.music.data.local.LocalScanner
 import com.hexnc.music.data.lyrics.LrclibClient
@@ -44,6 +48,7 @@ class AppContainer(context: Context) {
     private val songDao = SongDao(database)
     private val playlistDao = PlaylistDao(database)
     private val lyricDao = LyricDao(database)
+    private val albumDao = NeteaseAlbumDao(database)
 
     // ---- NetEase ---------------------------------------------------------------
     val cookieStore: NeteaseCookieStore = NeteaseCookieStore(app)
@@ -54,10 +59,26 @@ class AppContainer(context: Context) {
     // ---- repositories ----------------------------------------------------------
     val library: LibraryRepository = LibraryRepository(songDao, playlistDao, lyricDao, covers)
     val netease: NeteaseRepository =
-        NeteaseRepository(api, cookieStore, songDao, playlistDao, lyricDao, library)
+        NeteaseRepository(api, cookieStore, songDao, playlistDao, lyricDao, library, albumDao)
 
     val scanner: LocalScanner = LocalScanner(app)
     val playback: PlaybackController = PlaybackController(app, netease, settings)
+
+    // ---- downloads ------------------------------------------------------------
+    /**
+     * Export queue shared by every screen.
+     *
+     * The manager owns the only running job, so two screens cannot start two transfers, and the sink
+     * writes through `MediaStore` on API 29+ so no storage permission is needed.
+     */
+    val downloads: DownloadManager = DownloadManager(
+        scope = scope,
+        downloader = SongDownloader(
+            netease = netease,
+            library = library,
+            sink = AndroidDownloadSink(app),
+        ),
+    )
 
     // ---- online lyric completion -------------------------------------------------
     /** The key-less second lyric source; no session, so it is built eagerly and owned here. */

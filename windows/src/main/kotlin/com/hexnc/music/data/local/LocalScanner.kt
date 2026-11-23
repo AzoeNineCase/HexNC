@@ -9,6 +9,9 @@ import kotlinx.coroutines.withContext
 import org.jaudiotagger.audio.AudioFileIO
 import org.jaudiotagger.tag.FieldKey
 import java.io.File
+import java.nio.ByteBuffer
+import java.nio.charset.Charset
+import java.nio.charset.CodingErrorAction
 import java.util.Locale
 
 /** The result of scanning a folder: the tracks found plus any `.lrc` files that sat beside them. */
@@ -61,9 +64,9 @@ class LocalScanner(private val context: Context) {
         ScannedFolder(folder?.name.orEmpty(), songs, lyricsOf(songs, sidecars))
     }
 
-    /** Reads the raw text of a single `.lrc` file the user picked. */
+    /** Reads the raw text of a single `.lrc` file the user picked; null when unreadable or blank. */
     suspend fun readText(file: File): String? = withContext(Dispatchers.IO) {
-        runCatching { file.readText() }.getOrNull()
+        runCatching { decodeLyricBytes(file.readBytes()) }.getOrNull()?.takeIf { it.isNotBlank() }
     }
 
     /** The display name of a picked file, used to label an import. */
@@ -87,19 +90,43 @@ class LocalScanner(private val context: Context) {
         found
     }
 
-    /** `C:\Music\a.mp3` → the text of `C:\Music\a.lrc`, trying the common spellings of the suffix. */
+    /**
+     * `C:\Music\a.mp3` → the text of `C:\Music\a.lrc`, trying the common spellings of the suffix.
+     *
+     * Windows itself is case-insensitive, so the spellings mostly matter for a tree copied from
+     * Linux; the directory listing at the end is the belt-and-braces case for the odd mix such as
+     * `.lRc` that no fixed list would contain.
+     */
     private fun readSiblingLyric(path: String): String? {
         val file = File(path)
         val parent = file.parentFile ?: return null
         val stem = file.name.substringBeforeLast('.', file.name)
         if (stem.isBlank()) return null
-        return LYRIC_EXTENSION_SPELLINGS
+        val candidate = LYRIC_EXTENSION_SPELLINGS
             .asSequence()
             .map { File(parent, "$stem$it") }
             .firstOrNull { candidate -> runCatching { candidate.isFile && candidate.canRead() }.getOrDefault(false) }
-            ?.let { candidate -> runCatching { candidate.readText() }.getOrNull() }
+            ?: lyricSiblingByListing(parent, stem)
+            ?: return null
+        return runCatching { decodeLyricBytes(candidate.readBytes()) }
+            .getOrNull()
             ?.takeIf { it.isNotBlank() }
     }
+
+    /**
+     * Last-resort sibling lookup: one directory listing, matched on the exact stem and any
+     * capitalisation of the `.lrc` suffix.
+     *
+     * Only reached when every spelling above missed, so the readdir is paid for by the songs that
+     * would otherwise import no lyrics at all.
+     */
+    private fun lyricSiblingByListing(parent: File, stem: String): File? = runCatching {
+        parent.listFiles()?.firstOrNull { candidate ->
+            candidate.isFile &&
+                candidate.name.substringBeforeLast('.', candidate.name) == stem &&
+                candidate.name.substringAfterLast('.', "").equals("lrc", ignoreCase = true)
+        }
+    }.getOrNull()
 
     private fun scanTree(root: File): ScannedFolder {
         if (!root.isDirectory) return ScannedFolder(root.name, emptyList(), emptyMap())
@@ -152,9 +179,15 @@ class LocalScanner(private val context: Context) {
     private fun lyricsOf(songs: List<Song>, sidecars: Map<String, File>): Map<String, String> {
         val out = HashMap<String, String>()
         songs.forEach { song ->
-            val key = sidecars.keys.firstOrNull { baseName(song.title) == it } ?: return@forEach
+            // Pair on the audio *file* stem first, not on the tag title. A file named
+            // `01 - Song.mp3` whose ID3 title is just `Song` would otherwise never find
+            // `01 - Song.lrc` — the user sees a folder full of lyrics import none of them.
+            val stem = song.localPath?.let { baseName(File(it).name) }?.takeIf { it.isNotBlank() }
+            val key = stem?.takeIf { it in sidecars }
+                ?: sidecars.keys.firstOrNull { it == baseName(song.title) }
+                ?: return@forEach
             val sidecar = sidecars[key] ?: return@forEach
-            runCatching { sidecar.readText() }
+            runCatching { decodeLyricBytes(sidecar.readBytes()) }
                 .getOrNull()
                 ?.takeIf { it.isNotBlank() }
                 ?.let { out[song.id] = it }
@@ -163,8 +196,18 @@ class LocalScanner(private val context: Context) {
     }
 
     /** The `.lrc` sitting next to [file] with the same base name, if any. */
-    private fun sidecarBeside(file: File): File? =
-        file.parentFile?.let { parent -> File(parent, file.name.substringBeforeLast('.') + ".lrc").takeIf { it.isFile } }
+    private fun sidecarBeside(file: File): File? {
+        val parent = file.parentFile ?: return null
+        val stem = file.name.substringBeforeLast('.', file.name)
+        if (stem.isBlank()) return null
+        // Same suffix spellings as [readSiblingLyric]: a folder copied from a case-sensitive system
+        // can hold `Song.LRC`, and a hard-coded lowercase name would miss it.
+        return LYRIC_EXTENSION_SPELLINGS
+            .asSequence()
+            .map { File(parent, "$stem$it") }
+            .firstOrNull { it.isFile }
+            ?: lyricSiblingByListing(parent, stem)
+    }
 
     private class TrackTags(
         val title: String?,
@@ -216,7 +259,12 @@ class LocalScanner(private val context: Context) {
     private companion object {
         const val MAX_DEPTH = 12
 
-        /** Spellings tried for a sidecar lyric file, in order. */
+        /**
+         * Spellings tried for a sidecar lyric file, in order.
+         *
+         * Both cases are listed because a folder copied from a case-sensitive source can hold
+         * `Song.LRC`; anything rarer than these three is caught by [lyricSiblingByListing].
+         */
         val LYRIC_EXTENSION_SPELLINGS = listOf(".lrc", ".LRC", ".Lrc")
 
         /** DSD is listed so that a scan still reports it; playback then explains why it cannot play. */
@@ -229,6 +277,92 @@ class LocalScanner(private val context: Context) {
 
 /** Extensions of Direct Stream Digital audio, for which no desktop decoder is wired up. */
 internal val DSD_EXTENSIONS = setOf("dsf", "dff", "dsd")
+
+/**
+ * Decodes a `.lrc`/`.txt` sidecar into text.
+ *
+ * `File.readText()` assumes UTF-8, and that assumption is wrong often enough to make a local lyric
+ * import look broken: Chinese lyric sites still ship GBK, and files written by older Windows editors
+ * are UTF-16 with a BOM. Decoding GBK bytes as UTF-8 either throws (so the sheet is silently
+ * dropped) or produces mojibake (so the sheet is stored as garbage) — from the user's side both read
+ * as "the lyrics will not import". That is why every read in this file goes through here instead of
+ * calling `readText()`.
+ *
+ * The order is deliberate:
+ *
+ *  1. a BOM is the writer stating the encoding, so it wins outright;
+ *  2. UTF-16 that lost its BOM is sniffed by its NUL pattern, because NUL is legal UTF-8 and the
+ *     strict check below would otherwise accept that file and return a NUL after every character;
+ *  3. strict UTF-8 — nearly every file, and the only case where the guess can be *proven*;
+ *  4. GB18030, a superset of GBK and GB2312, which covers the Chinese legacy case the bug report is
+ *     about;
+ *  5. lenient UTF-8, so the function is total: a genuinely odd file still yields something the user
+ *     can recognise as wrong instead of an empty lyric pane.
+ */
+internal fun decodeLyricBytes(bytes: ByteArray): String {
+    if (bytes.isEmpty()) return ""
+    when {
+        // A leading U+FEFF as UTF-8 would otherwise survive into the first line and break the
+        // `[ti:…]` tag match, so the BOM bytes are skipped rather than decoded.
+        bytes.hasPrefix(UTF8_BOM) ->
+            return String(bytes, UTF8_BOM.size, bytes.size - UTF8_BOM.size, Charsets.UTF_8)
+        bytes.hasPrefix(UTF16_LE_BOM) -> return String(bytes, 2, bytes.size - 2, Charsets.UTF_16LE)
+        bytes.hasPrefix(UTF16_BE_BOM) -> return String(bytes, 2, bytes.size - 2, Charsets.UTF_16BE)
+    }
+    sniffBomlessUtf16(bytes)?.let { return it }
+    strictDecode(bytes, Charsets.UTF_8)?.let { return it }
+    strictDecode(bytes, GB18030)?.let { return it }
+    return String(bytes, Charsets.UTF_8)
+}
+
+private val UTF8_BOM = byteArrayOf(0xEF.toByte(), 0xBB.toByte(), 0xBF.toByte())
+private val UTF16_LE_BOM = byteArrayOf(0xFF.toByte(), 0xFE.toByte())
+private val UTF16_BE_BOM = byteArrayOf(0xFE.toByte(), 0xFF.toByte())
+
+/** GB18030 also covers GBK and GB2312, which is what Chinese lyric sites actually ship. */
+private val GB18030: Charset = Charset.forName("GB18030")
+
+private fun ByteArray.hasPrefix(prefix: ByteArray): Boolean {
+    if (size < prefix.size) return false
+    for (i in prefix.indices) if (this[i] != prefix[i]) return false
+    return true
+}
+
+/** Decodes strictly, or returns null if the bytes are not valid in [charset]. */
+private fun strictDecode(bytes: ByteArray, charset: Charset): String? = runCatching {
+    charset.newDecoder()
+        .onMalformedInput(CodingErrorAction.REPORT)
+        .onUnmappableCharacter(CodingErrorAction.REPORT)
+        .decode(ByteBuffer.wrap(bytes))
+        .toString()
+}.getOrNull()
+
+/**
+ * Decodes UTF-16 that has no BOM, or returns null when the bytes do not look like it.
+ *
+ * Latin text in UTF-16 is mostly `<char> 0x00` (LE) or `0x00 <char>` (BE), and those NULs are legal
+ * UTF-8, so this has to run before the strict UTF-8 attempt. The 60% bar keeps a stray NUL in an
+ * otherwise ordinary UTF-8 file from being read as UTF-16.
+ */
+private fun sniffBomlessUtf16(bytes: ByteArray): String? {
+    // An even window, so that a byte pair never straddles the sample boundary.
+    val sample = minOf(bytes.size, 4096) and 0x7FFFFFFE
+    if (sample < 4) return null
+    var evenZeros = 0
+    var oddZeros = 0
+    var i = 0
+    while (i < sample) {
+        if (bytes[i] == 0.toByte()) evenZeros++
+        if (bytes[i + 1] == 0.toByte()) oddZeros++
+        i += 2
+    }
+    val pairs = sample / 2
+    return when {
+        oddZeros * 10 >= pairs * 6 -> String(bytes, Charsets.UTF_16LE)
+        evenZeros * 10 >= pairs * 6 -> String(bytes, Charsets.UTF_16BE)
+        else -> null
+    }
+}
 
 /**
  * True when [pathOrUri] names a DSD file.

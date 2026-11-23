@@ -26,6 +26,7 @@ import top.yukonga.miuix.kmp.icon.extended.Delete
 import top.yukonga.miuix.kmp.icon.extended.Edit
 import top.yukonga.miuix.kmp.icon.extended.Favorites
 import top.yukonga.miuix.kmp.icon.extended.FavoritesFill
+import top.yukonga.miuix.kmp.icon.extended.FileDownloads
 import top.yukonga.miuix.kmp.icon.extended.Import
 import top.yukonga.miuix.kmp.icon.extended.Notes
 import top.yukonga.miuix.kmp.icon.extended.Play
@@ -89,6 +90,20 @@ fun TrackActionsSheet(
                 startAction = { SheetIcon(MiuixIcons.Add) },
                 onClick = onOpenAddToPlaylist,
             )
+            if (song.source == SongSource.NETEASE && (song.neteaseId ?: 0L) > 0L) {
+                BasicComponent(
+                    title = strings.download,
+                    summary = strings.downloadSummaryHint,
+                    startAction = { SheetIcon(MiuixIcons.FileDownloads) },
+                    onClick = {
+                        container.downloads.enqueue(
+                            listOf(song),
+                            downloadConfig(container, strings),
+                        )
+                        onDismiss()
+                    },
+                )
+            }
             BasicComponent(
                 title = strings.changeCover,
                 startAction = { SheetIcon(MiuixIcons.Edit) },

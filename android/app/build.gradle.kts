@@ -26,8 +26,8 @@ android {
         applicationId = "com.hexnc.music"
         minSdk = 26
         targetSdk = 37
-        versionCode = 2
-        versionName = "1.1.0"
+        versionCode = 4
+        versionName = "1.2.0"
         vectorDrawables { useSupportLibrary = true }
     }
 
@@ -140,4 +140,6 @@ dependencies {
     // Host-side JVM tests. Deliberately no Robolectric / Android test runner: the app has no device
     // or emulator available here, so these target the pure-Kotlin layers only.
     testImplementation(libs.junit4)
+    // Independent FLAC reader, used only by unit tests to cross-check the tag writer we ship.
+    testImplementation("org.jaudiotagger:jaudiotagger:2.0.1")
 }

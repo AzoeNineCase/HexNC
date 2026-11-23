@@ -3,8 +3,12 @@ package com.hexnc.music.di
 import android.content.Context
 import com.hexnc.music.data.db.HexNCDatabase
 import com.hexnc.music.data.db.LyricDao
+import com.hexnc.music.data.db.NeteaseAlbumDao
 import com.hexnc.music.data.db.PlaylistDao
 import com.hexnc.music.data.db.SongDao
+import com.hexnc.music.data.download.DesktopDownloadSink
+import com.hexnc.music.data.download.DownloadManager
+import com.hexnc.music.data.download.SongDownloader
 import com.hexnc.music.data.local.CoverStore
 import com.hexnc.music.data.local.LocalScanner
 import com.hexnc.music.data.lyrics.LrclibClient
@@ -21,6 +25,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import java.io.File
 
 /**
  * The single object graph for the process.
@@ -44,6 +49,7 @@ class AppContainer(context: Context) {
     private val songDao = SongDao(database)
     private val playlistDao = PlaylistDao(database)
     private val lyricDao = LyricDao(database)
+    private val albumDao = NeteaseAlbumDao(database)
 
     // ---- NetEase ---------------------------------------------------------------
     val cookieStore: NeteaseCookieStore = NeteaseCookieStore(app)
@@ -54,13 +60,35 @@ class AppContainer(context: Context) {
     // ---- repositories ----------------------------------------------------------
     val library: LibraryRepository = LibraryRepository(songDao, playlistDao, lyricDao, covers)
     val netease: NeteaseRepository =
-        NeteaseRepository(api, cookieStore, songDao, playlistDao, lyricDao, library)
+        NeteaseRepository(api, cookieStore, songDao, playlistDao, lyricDao, library, albumDao)
 
     val lrclib: LrclibClient = LrclibClient()
     val online: OnlineLyricsRepository = OnlineLyricsRepository(netease, lrclib, library)
 
     val scanner: LocalScanner = LocalScanner(app)
     val playback: PlaybackController = PlaybackController(app, netease, settings)
+
+    // ---- downloads ------------------------------------------------------------
+    /**
+     * Export queue shared by every screen.
+     *
+     * The sink resolves the destination folder lazily from settings, so a path change applies to the
+     * next run, and the manager owns the only running job so two screens cannot start two transfers.
+     */
+    val downloads: DownloadManager = DownloadManager(
+        scope = scope,
+        downloader = SongDownloader(
+            netease = netease,
+            library = library,
+            sink = DesktopDownloadSink {
+                File(
+                    settings.current.downloadDir.ifBlank {
+                        DesktopDownloadSink.defaultRoot().absolutePath
+                    },
+                )
+            },
+        ),
+    )
 
     /**
      * Restores a persisted NetEase session and binds playback at startup.

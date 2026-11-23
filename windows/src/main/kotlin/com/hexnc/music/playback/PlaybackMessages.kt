@@ -21,6 +21,18 @@ internal const val MESSAGE_PLAYBACK_DSD = "playback_dsd"
 /** The track downloaded but could not be decoded, or failed for any other reason. */
 internal const val MESSAGE_PLAYBACK_FAILED = "playback_failed"
 
+/** The container or codec is known-unsupported on this platform (Opus, WMA, DST-compressed DSD). */
+internal const val MESSAGE_PLAYBACK_UNSUPPORTED_FORMAT = "playback_unsupported_format"
+
+/** A decoder exists but rejected the bitstream — a truncated, corrupt or DRM-wrapped file. */
+internal const val MESSAGE_PLAYBACK_DECODE = "playback_decode"
+
+/** The audio device would not open, or stopped accepting samples mid-track. */
+internal const val MESSAGE_PLAYBACK_DEVICE = "playback_device"
+
+/** The file exists but the app is not allowed to read it. */
+internal const val MESSAGE_PLAYBACK_ACCESS = "playback_access"
+
 /**
  * The player error codes this app distinguishes.
  *
@@ -35,7 +47,21 @@ object PlaybackErrorCode {
     const val IO_CLEARTEXT_NOT_PERMITTED = 2007
     const val IO_FILE_NOT_FOUND = 2005
     const val IO_NO_PERMISSION = 2006
+
+    /** The one legacy decoder code, kept because stored playlists and tests still mention it. */
     const val DECODING_FAILED = 3001
+
+    /** The container or codec is not supported on this platform — the user can act on the format. */
+    const val UNSUPPORTED_FORMAT = 3002
+
+    /** A decoder exists but rejected the bytes: truncated, corrupt, or DRM-wrapped. */
+    const val DECODE_ERROR = 3003
+
+    /** No output device would open, or it stopped accepting samples. Retrying usually helps. */
+    const val DEVICE_ERROR = 3004
+
+    /** The file is there but unreadable — permissions, a lock, or a removed drive. */
+    const val FILE_ACCESS = 3005
 }
 
 /**
@@ -54,15 +80,26 @@ internal fun playbackMessageCodeFor(errorCode: Int): String = when (errorCode) {
     PlaybackErrorCode.IO_BAD_HTTP_STATUS,
     -> MESSAGE_PLAYBACK_NETWORK
 
-    // The file was moved or deleted between the scan and the tap, or it is no longer readable.
-    PlaybackErrorCode.IO_FILE_NOT_FOUND,
-    PlaybackErrorCode.IO_NO_PERMISSION,
-    -> MESSAGE_PLAYBACK_FILE_MISSING
+    // The file was moved or deleted between the scan and the tap.
+    PlaybackErrorCode.IO_FILE_NOT_FOUND -> MESSAGE_PLAYBACK_FILE_MISSING
 
-    // Java Sound reports an unsupported codec as a decode failure, which is the one case where the
-    // user can act on the format rather than on the file.
+    // It is still there, but the app is not allowed to read it: permissions, a lock, or a removed
+    // drive. Worth a different sentence from "missing", because the fix is different.
+    PlaybackErrorCode.IO_NO_PERMISSION,
+    PlaybackErrorCode.FILE_ACCESS,
+    -> MESSAGE_PLAYBACK_ACCESS
+
+    // The codec is known-unsupported here (Opus, WMA, DST). Nothing the user plays differently will
+    // help, so say the format itself is the problem.
+    PlaybackErrorCode.UNSUPPORTED_FORMAT -> MESSAGE_PLAYBACK_UNSUPPORTED_FORMAT
+
+    // A decoder existed and rejected the bytes: truncated, corrupt, or DRM-wrapped.
     PlaybackErrorCode.DECODING_FAILED,
-    -> MESSAGE_PLAYBACK_UNSUPPORTED
+    PlaybackErrorCode.DECODE_ERROR,
+    -> MESSAGE_PLAYBACK_DECODE
+
+    // Hardware, not the file. Retrying, or picking another output device, is the way out.
+    PlaybackErrorCode.DEVICE_ERROR -> MESSAGE_PLAYBACK_DEVICE
 
     else -> MESSAGE_PLAYBACK_FAILED
 }

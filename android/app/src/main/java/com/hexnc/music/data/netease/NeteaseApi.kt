@@ -247,36 +247,125 @@ class NeteaseApi(private val client: NeteaseClient) {
     /**
      * The albums the signed-in account has favourited, one page at a time.
      *
-     * The plain `api` transport is tried first because the analogous sublist route
-     * (`/api/user/playlist`) answers there; the eapi retry covers the case where the service serves
-     * this one encrypted only. `total=true` is what makes the reply carry `hasMore`, which is the
-     * only reliable paging signal this route offers.
+     * The encrypted gateway is tried first: on current accounts the plain route answers this
+     * endpoint with `code: -460` (or a 200 with an empty `albums` array), which is why the album
+     * page used to render "there are no favourited albums" for accounts that have hundreds. The
+     * plain route stays as a fallback because it is still the one that answers for some accounts.
+     *
+     * The page size is clamped to 100: the service silently caps larger values, so asking for 200
+     * returned as many albums as 100 — one page — which looked identical to "the account has 100".
+     *
+     * When the gateway answers with an empty page, the other transport is tried before the empty
+     * result is believed. Both codes are folded into the exception when neither answers, so the UI
+     * can show which one refused instead of a bare "failed".
      */
     suspend fun albumSublist(limit: Int = 100, offset: Int = 0): NcAlbumSublistResponse {
-        val form = mapOf(
-            "limit" to limit.toString(),
-            "offset" to offset.toString(),
-            "total" to "true",
-        )
-        val json = runCatching {
-            client.api("/api/album/sublist", form).requireSuccess("/api/album/sublist")
-        }.getOrElse {
+        val pageSize = limit.coerceIn(1, 100)
+        val eapiResult = runCatching {
             client.eapi(
                 "/api/album/sublist",
                 buildJsonObject {
-                    put("limit", limit)
+                    put("limit", pageSize)
                     put("offset", offset)
                     put("total", true)
                 },
-            ).requireSuccess("/api/album/sublist")
+            ).requireSuccess("/api/album/sublist").decode<NcAlbumSublistResponse>()
         }
-        return json.decode()
+        val eapiError = eapiResult.exceptionOrNull() as? NeteaseException
+        val viaEapi = eapiResult.getOrNull()
+        if (viaEapi != null && (viaEapi.albums.isNotEmpty() || (viaEapi.total ?: 0) > 0)) {
+            return viaEapi
+        }
+
+        val webResult = runCatching {
+            client.api(
+                "/api/album/sublist",
+                mapOf(
+                    "limit" to pageSize.toString(),
+                    "offset" to offset.toString(),
+                    "total" to "true",
+                ),
+            ).requireSuccess("/api/album/sublist").decode<NcAlbumSublistResponse>()
+        }
+        val viaWeb = webResult.getOrNull() ?: run {
+            val webError = webResult.exceptionOrNull() as? NeteaseException
+            throw NeteaseException(
+                webError?.code ?: -1,
+                "album/sublist: eapi=${eapiError?.code ?: "ok"} web=${webError?.code ?: "-"}",
+            )
+        }
+
+        // An empty web page is only trusted when eapi had nothing better to say either.
+        return if (viaWeb.albums.isEmpty() && (viaWeb.total ?: 0) == 0 && viaEapi != null) {
+            viaEapi
+        } else {
+            viaWeb
+        }
     }
 
     suspend fun artistTopSongs(artistId: Long): List<NcSong> {
         val json = client.api("/api/artist/top/song", mapOf("id" to artistId.toString()))
             .requireSuccess("/api/artist/top/song")
         return json.decode<NcArtistTopSongsResponse>().songs
+    }
+
+    /**
+     * The albums [id] has released.
+     *
+     * The artist id belongs in the **path** on this route: posting it as a form field (`id=…` on
+     * `/api/artist/albums`) is answered with `{"code":400,"msg":"参数错误"}` for every id tried,
+     * while `/api/artist/albums/6452` returns the payload. The form body only carries the paging
+     * trio. The eapi retry mirrors [albumSublist] — the plain transport is the one that answers
+     * today, but this family of routes has moved to the encrypted gateway before.
+     */
+    suspend fun artistAlbums(id: Long, limit: Int = 50, offset: Int = 0): NcArtistAlbumsResponse {
+        val path = "/api/artist/albums/$id"
+        val form = mapOf(
+            "limit" to limit.toString(),
+            "offset" to offset.toString(),
+            "total" to "true",
+        )
+        val json = runCatching {
+            client.api(path, form).requireSuccess("/api/artist/albums")
+        }.getOrElse {
+            client.eapi(
+                path,
+                buildJsonObject {
+                    put("limit", limit)
+                    put("offset", offset)
+                    put("total", true)
+                },
+            ).requireSuccess("/api/artist/albums")
+        }
+        return json.decode()
+    }
+
+    /**
+     * Album-only catalogue search, for the case where only an artist *name* is known.
+     *
+     * `s` is the parameter both route generations actually read: sending `keywords` alone is a
+     * `400` on `/api/search/get`, while `s` works on both, so both are sent and each gateway picks
+     * the one it knows. `type=10` is what restricts the reply to albums; the album array still
+     * arrives nested inside `result`, hence [NcSearchResponse].
+     */
+    suspend fun searchAlbums(keyword: String, limit: Int = 30): List<NcAlbum> {
+        val form = mapOf(
+            "s" to keyword,
+            "keywords" to keyword,
+            "type" to "10",
+            "limit" to limit.toString(),
+            "offset" to "0",
+        )
+        // Same two-route arrangement as [search]; the songs search already proved that cloudsearch/pc
+        // is preferred and /api/search/get is the stand-in when the first is unavailable.
+        val json = runCatching { client.api("/api/cloudsearch/pc", form) }
+            .getOrElse { client.api("/api/search/get", form) }
+        return json.requireSuccess("/api/cloudsearch/pc")
+            .decode<NcSearchResponse>()
+            .result
+            ?.albums
+            .orEmpty()
+            .take(limit)
     }
 
     // ------------------------------------------------------------------ writes

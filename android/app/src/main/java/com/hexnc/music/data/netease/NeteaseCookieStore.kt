@@ -97,28 +97,32 @@ class NeteaseCookieStore(context: Context) {
     @Synchronized
     fun clear() {
         map.clear()
-        prefs.edit().remove(KEY).remove(KEY_IMPORTED_UID).apply()
+        prefs.edit().remove(KEY).remove(KEY_LIBRARY_STATE).apply()
     }
 
     /**
-     * Records that [uid]'s library has been imported, reporting whether that is news.
+     * Records that [uid]'s library was synced at [at].
      *
-     * Kept alongside the cookies because it is session state: [clear] drops it too, so signing in
-     * again after a logout imports the account afresh. Returning `true` only the first time is what
-     * keeps the automatic post-sign-in import from re-downloading the whole library on every launch.
+     * This used to be a one-shot claim: the second launch of the same account was silently skipped,
+     * so newly added songs never arrived until the user wiped the app and signed in again. The
+     * timestamp is kept instead, purely so the UI can say "上次同步于 X" and so the automatic
+     * refresh can decide whether it is due — it never blocks a sync on its own.
      */
     @Synchronized
-    fun claimLibraryImport(uid: Long): Boolean {
-        if (uid <= 0L) return false
-        if (prefs.getLong(KEY_IMPORTED_UID, 0L) == uid) return false
-        prefs.edit().putLong(KEY_IMPORTED_UID, uid).apply()
-        return true
+    fun markLibrarySynced(uid: Long, at: Long = System.currentTimeMillis()) {
+        if (uid <= 0L) return
+        prefs.edit().putString(KEY_LIBRARY_STATE, "$uid:$at").apply()
     }
 
-    /** Lets the next sign-in or launch retry an import that failed. */
+    /** The last successful sync for [uid], or 0 when it never synced / another account is signed in. */
     @Synchronized
-    fun forgetLibraryImport() {
-        prefs.edit().remove(KEY_IMPORTED_UID).apply()
+    fun lastLibrarySyncAt(uid: Long): Long {
+        if (uid <= 0L) return 0L
+        val raw = prefs.getString(KEY_LIBRARY_STATE, null) ?: return 0L
+        val split = raw.indexOf(':')
+        if (split <= 0) return 0L
+        if (raw.substring(0, split).toLongOrNull() != uid) return 0L
+        return raw.substring(split + 1).toLongOrNull() ?: 0L
     }
 
     /** The CSRF token the eapi payload header expects, derived from the `__csrf` cookie. */
@@ -134,8 +138,8 @@ class NeteaseCookieStore(context: Context) {
         private const val PREFS = "hexnc_netease_session"
         private const val KEY = "cookies"
 
-        /** The account whose library has already been imported automatically. */
-        private const val KEY_IMPORTED_UID = "imported_uid"
+        /** `uid:timestamp` of the last successful library sync, or absent when never synced. */
+        private const val KEY_LIBRARY_STATE = "library_sync_state"
 
         /** A comma that begins another `name=value` pair rather than an `Expires` date. */
         private val COOKIE_SEPARATOR = Regex(",(?=\\s*[A-Za-z_$][A-Za-z0-9_$.\\-]*=)")

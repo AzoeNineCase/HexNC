@@ -390,6 +390,51 @@ class PlaylistDao(private val helper: HexNCDatabase) {
         }
     }
 
+    /**
+     * Add tracks that are missing, without deleting any that are not in [songIds].
+     *
+     * Used when the server's id list is known to be incomplete (a track lost copyright and vanished
+     * from `trackIds`): reconciling a short list would delete real membership rows, while appending
+     * still picks up everything that *did* arrive.
+     *
+     * @return how many membership rows were added.
+     */
+    fun appendMissing(playlistId: String, songIds: List<String>): Int {
+        if (songIds.isEmpty()) return 0
+        val db = helper.writableDatabase
+        return db.tx {
+            val present = HashSet<String>()
+            db.rawQuery(
+                "SELECT song_id FROM ${HexNCDatabase.T_PLAYLIST_SONGS} WHERE playlist_id = ?",
+                arrayOf(playlistId)
+            ).use { c -> while (c.moveToNext()) present += c.getString(0) }
+            var position = (db.scalarLong(
+                "SELECT MAX(position) FROM ${HexNCDatabase.T_PLAYLIST_SONGS} WHERE playlist_id = ?",
+                playlistId
+            ) ?: -1L) + 1L
+            var added = 0
+            songIds.forEach { sid ->
+                if (sid in present) return@forEach
+                val values = ContentValues().apply {
+                    put("playlist_id", playlistId)
+                    put("song_id", sid)
+                    put("position", position)
+                    put("added_at", System.currentTimeMillis())
+                }
+                if (db.insertWithOnConflict(
+                        HexNCDatabase.T_PLAYLIST_SONGS, null, values, SQLiteDatabase.CONFLICT_IGNORE
+                    ) >= 0
+                ) {
+                    present += sid
+                    position++
+                    added++
+                }
+            }
+            if (added > 0) refreshTrackCount(db, playlistId)
+            added
+        }
+    }
+
     fun size(playlistId: String): Int =
         helper.readableDatabase.scalarLong(
             "SELECT COUNT(*) FROM ${HexNCDatabase.T_PLAYLIST_SONGS} WHERE playlist_id = ?",

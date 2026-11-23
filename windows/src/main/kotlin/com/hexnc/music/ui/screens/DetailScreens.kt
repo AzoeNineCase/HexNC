@@ -29,15 +29,22 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hexnc.music.data.model.Playlist
 import com.hexnc.music.data.model.PlaylistSource
 import com.hexnc.music.data.model.Song
+import com.hexnc.music.data.netease.NcAlbum
 import com.hexnc.music.data.prefs.PlayMode
 import com.hexnc.music.di.AppContainer
 import com.hexnc.music.ui.Route
+import com.hexnc.music.ui.components.CollectionRow
 import com.hexnc.music.ui.components.CoverArt
 import com.hexnc.music.ui.components.EmptyState
 import com.hexnc.music.ui.components.HexList
 import com.hexnc.music.ui.components.LoadingBox
+import com.hexnc.music.ui.components.SectionHeader
 import com.hexnc.music.ui.components.SongRow
 import com.hexnc.music.ui.components.TrackActionsSheet
+import com.hexnc.music.ui.components.downloadConfig
+import com.hexnc.music.ui.components.downloadable
+import com.hexnc.music.ui.components.rememberAlbumOpener
+import com.hexnc.music.ui.components.rememberLyricImporter
 import com.hexnc.music.ui.i18n.LocalStrings
 import com.hexnc.music.ui.i18n.Strings
 import com.hexnc.music.ui.platform.DesktopDialogs
@@ -95,6 +102,10 @@ fun PlaylistDetailScreen(
     fun message(text: String) {
         scope.launch { snackbarHostState.showSnackbar(text) }
     }
+
+    // Picking a file clears the "lyrics were deleted" tombstone first, so a song whose lyrics
+    // the user removed once can still be given a local file later.
+    val importLyric = rememberLyricImporter(container, strings, ::message)
 
     /**
      * Picks and stores a playlist cover.
@@ -187,6 +198,12 @@ fun PlaylistDetailScreen(
                     onLongClick = { song ->
                         actionsSong = song
                         showActions = true
+                    },
+                    onDownloadAll = {
+                        container.downloads.enqueue(
+                            songs.downloadable(),
+                            downloadConfig(container, strings),
+                        )
                     },
                 )
             }
@@ -306,7 +323,7 @@ fun PlaylistDetailScreen(
             onDismissAddToPlaylist = { showAddToPlaylist = false },
             onOpenAddToPlaylist = { showAddToPlaylist = true },
             onSetCover = { message(strings.changeCover) },
-            onImportLyric = { message(strings.importFromFiles) },
+            onImportLyric = { actionsSong?.id?.let(importLyric) },
             onDeleted = { message(strings.delete) },
         )
     }
@@ -342,6 +359,10 @@ fun AlbumDetailScreen(
     fun message(text: String) {
         scope.launch { snackbarHostState.showSnackbar(text) }
     }
+
+    // Picking a file clears the "lyrics were deleted" tombstone first, so a song whose lyrics
+    // the user removed once can still be given a local file later.
+    val importLyric = rememberLyricImporter(container, strings, ::message)
 
     DetailScaffold(
         title = album.ifBlank { strings.unknownAlbum },
@@ -381,6 +402,12 @@ fun AlbumDetailScreen(
                         actionsSong = song
                         showActions = true
                     },
+                    onDownloadAll = {
+                        container.downloads.enqueue(
+                            songs.downloadable(),
+                            downloadConfig(container, strings),
+                        )
+                    },
                 )
             }
         }
@@ -396,7 +423,7 @@ fun AlbumDetailScreen(
             onDismissAddToPlaylist = { showAddToPlaylist = false },
             onOpenAddToPlaylist = { showAddToPlaylist = true },
             onSetCover = { message(strings.changeCover) },
-            onImportLyric = { message(strings.importFromFiles) },
+            onImportLyric = { actionsSong?.id?.let(importLyric) },
             onDeleted = { message(strings.delete) },
         )
     }
@@ -408,6 +435,7 @@ fun AlbumDetailScreen(
 fun ArtistDetailScreen(
     container: AppContainer,
     artist: String,
+    neteaseArtistId: Long? = null,
     snackbarHostState: SnackbarHostState,
     onNavigate: (Route) -> Unit,
     onBack: () -> Unit,
@@ -432,6 +460,15 @@ fun ArtistDetailScreen(
         scope.launch { snackbarHostState.showSnackbar(text) }
     }
 
+    // Picking a file clears the "lyrics were deleted" tombstone first, so a song whose lyrics
+    // the user removed once can still be given a local file later.
+    val importLyric = rememberLyricImporter(container, strings, ::message)
+
+    // The discography is a live NetEase read: an artist page is useful even when nothing by them has
+    // been imported yet, so it must not depend on the local song list being non-empty.
+    val artistAlbums = rememberArtistAlbums(container, artist, neteaseArtistId)
+    val openAlbum = rememberAlbumOpener(container, strings, ::message, onNavigate)
+
     DetailScaffold(
         title = artist.ifBlank { strings.unknownArtist },
         strings = strings,
@@ -441,11 +478,14 @@ fun ArtistDetailScreen(
         Box(modifier = Modifier.fillMaxWidth().padding(top = padding.calculateTopPadding())) {
             when {
                 !loaded -> LoadingBox()
-                songs.isEmpty() -> EmptyState(title = strings.noResults)
+                songs.isEmpty() && artistAlbums.albums.isEmpty() -> EmptyState(title = strings.noResults)
                 else -> SongCollection(
                     songs = songs,
                     strings = strings,
                     bottomPadding = padding.calculateBottomPadding(),
+                    albums = artistAlbums.albums,
+                    albumsLoading = artistAlbums.loading,
+                    onOpenAlbum = openAlbum,
                     header = {
                         CollectionHeader(
                             title = artist.ifBlank { strings.unknownArtist },
@@ -469,6 +509,12 @@ fun ArtistDetailScreen(
                         actionsSong = song
                         showActions = true
                     },
+                    onDownloadAll = {
+                        container.downloads.enqueue(
+                            songs.downloadable(),
+                            downloadConfig(container, strings),
+                        )
+                    },
                 )
             }
         }
@@ -484,7 +530,7 @@ fun ArtistDetailScreen(
             onDismissAddToPlaylist = { showAddToPlaylist = false },
             onOpenAddToPlaylist = { showAddToPlaylist = true },
             onSetCover = { message(strings.changeCover) },
-            onImportLyric = { message(strings.importFromFiles) },
+            onImportLyric = { actionsSong?.id?.let(importLyric) },
             onDeleted = { message(strings.delete) },
         )
     }
@@ -508,6 +554,10 @@ private fun SongCollection(
     onShuffle: () -> Unit,
     onClickIndex: (Int) -> Unit,
     onLongClick: (Song) -> Unit,
+    albums: List<NcAlbum> = emptyList(),
+    albumsLoading: Boolean = false,
+    onOpenAlbum: (NcAlbum) -> Unit = {},
+    onDownloadAll: (() -> Unit)? = null,
 ) {
     HexList(
         contentPadding = PaddingValues(top = 8.dp, bottom = bottomPadding + 24.dp),
@@ -518,10 +568,36 @@ private fun SongCollection(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 10.dp),
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                Button(onClick = onPlayAll) {
-                    Text(strings.playAll, style = MiuixTheme.textStyles.button)
+                if (songs.isNotEmpty()) {
+                    Button(onClick = onPlayAll) {
+                        Text(strings.playAll, style = MiuixTheme.textStyles.button)
+                    }
+                    TextButton(text = strings.shuffleAll, onClick = onShuffle)
                 }
-                TextButton(text = strings.shuffleAll, onClick = onShuffle)
+                if (onDownloadAll != null && songs.downloadable().isNotEmpty()) {
+                    TextButton(text = strings.downloadAll, onClick = onDownloadAll)
+                }
+            }
+        }
+        // The artist page is the only caller that fills this in: a NetEase artist's releases are a
+        // separate read from the local songs, and they belong on the page people land on from search.
+        if (albumsLoading || albums.isNotEmpty()) {
+            item(key = "albums-header") {
+                SectionHeader(
+                    title = strings.albums,
+                    actionLabel = if (albums.isEmpty()) null else strings.albums(albums.size),
+                )
+            }
+            items(albums.take(ALBUM_SHELF_LIMIT), key = { "artist-album-" + it.id }) { album ->
+                CollectionRow(
+                    title = album.name,
+                    subtitle = album.artistName.ifBlank { null },
+                    coverUrl = album.picUrl,
+                    overridePath = null,
+                    strings = strings,
+                    count = album.size,
+                    onClick = { onOpenAlbum(album) },
+                )
             }
         }
         items(songs, key = { it.id }) { song ->
@@ -534,6 +610,9 @@ private fun SongCollection(
         }
     }
 }
+
+/** How many of an artist's releases the page lists before it becomes a discography browser. */
+private const val ALBUM_SHELF_LIMIT = 8
 
 /** Cover, title and metadata block shared by the three detail screens. */
 @Composable

@@ -277,6 +277,7 @@ class PlaybackController(
                 }.getOrDefault(emptyMap())
 
             var dsdSkipped = 0
+            var blockedFormat: DecodeSupport? = null
             val items = songs.mapNotNull { song ->
                 val uri = when (song.source) {
                     SongSource.LOCAL -> {
@@ -294,7 +295,16 @@ class PlaybackController(
                                 Uri.fromFile(pcm).toString()
                             }
                         } else {
-                            localUriOf(song)
+                            // Formats no platform decoder can read (WMA, APE, DST) are refused before
+                            // ExoPlayer is handed a MediaItem: the queue then still plays, and the
+                            // user is told the format is the problem rather than the file.
+                            val support = DecodeCapability.of(song.localPath ?: song.mediaUri)
+                            if (support.isBlocked) {
+                                if (blockedFormat == null) blockedFormat = support
+                                null
+                            } else {
+                                localUriOf(song)
+                            }
                         }
                     }
 
@@ -308,7 +318,7 @@ class PlaybackController(
                 }
                 uri?.let { song to mediaItemOf(song, it) }
             }
-            ResolvedQueue(items, dsdSkipped)
+            ResolvedQueue(items, dsdSkipped, blockedFormat)
         }
 
     // ------------------------------------------------------------------ commands
@@ -319,10 +329,20 @@ class PlaybackController(
         connect()
         val resolved = resolve(songs)
         if (resolved.items.isEmpty()) {
-            postMessage(if (resolved.dsdSkipped > 0) MESSAGE_PLAYBACK_DSD else MESSAGE_NO_PLAYABLE)
+            postMessage(
+                when {
+                    resolved.blockedFormat != null -> MESSAGE_PLAYBACK_UNSUPPORTED_FORMAT
+                    resolved.dsdSkipped > 0 -> MESSAGE_PLAYBACK_DSD
+                    else -> MESSAGE_NO_PLAYABLE
+                },
+            )
             return
         }
-        if (resolved.dsdSkipped > 0) postMessage(MESSAGE_PLAYBACK_DSD)
+        if (resolved.blockedFormat != null) {
+            postMessage(MESSAGE_PLAYBACK_UNSUPPORTED_FORMAT)
+        } else if (resolved.dsdSkipped > 0) {
+            postMessage(MESSAGE_PLAYBACK_DSD)
+        }
         // Map the requested start position onto the filtered list: count how many of the songs
         // before it were dropped so the user still lands on the track they tapped.
         val target = songs.getOrNull(startIndex.coerceIn(0, songs.lastIndex))
@@ -344,7 +364,11 @@ class PlaybackController(
         connect()
         val media = controller ?: return 0
         val resolved = resolve(songs.filter { candidate -> queue.none { it.id == candidate.id } })
-        if (resolved.dsdSkipped > 0) postMessage(MESSAGE_PLAYBACK_DSD)
+        if (resolved.blockedFormat != null) {
+            postMessage(MESSAGE_PLAYBACK_UNSUPPORTED_FORMAT)
+        } else if (resolved.dsdSkipped > 0) {
+            postMessage(MESSAGE_PLAYBACK_DSD)
+        }
         if (resolved.items.isEmpty()) return 0
         queue = queue + resolved.items.map { it.first }
         _queueFlow.value = queue
@@ -426,7 +450,11 @@ class PlaybackController(
  * [dsdSkipped] is carried alongside the items because "the queue is shorter than what you tapped" is
  * a question the user will ask, and the only place that knows the answer is the resolver.
  */
-private data class ResolvedQueue(val items: List<Pair<Song, MediaItem>>, val dsdSkipped: Int)
+private data class ResolvedQueue(
+    val items: List<Pair<Song, MediaItem>>,
+    val dsdSkipped: Int,
+    val blockedFormat: DecodeSupport? = null,
+)
 
 /** Nothing in the queue could be turned into a playable URI. */
 internal const val MESSAGE_NO_PLAYABLE = "no_playable"
@@ -452,6 +480,18 @@ internal const val MESSAGE_PLAYBACK_DSD_DECODING = "playback_dsd_decoding"
 /** Anything else ExoPlayer reported. */
 internal const val MESSAGE_PLAYBACK_FAILED = "playback_failed"
 
+/** The container or codec is known-unsupported here (WMA, APE, DST-compressed DSD). */
+internal const val MESSAGE_PLAYBACK_UNSUPPORTED_FORMAT = "playback_unsupported_format"
+
+/** A decoder exists but rejected the bitstream — a truncated, corrupt or DRM-wrapped file. */
+internal const val MESSAGE_PLAYBACK_DECODE = "playback_decode"
+
+/** The audio output could not be initialised or stopped accepting samples. */
+internal const val MESSAGE_PLAYBACK_DEVICE = "playback_device"
+
+/** The file exists but the app is not allowed to read it (an expired SAF grant, a locked folder). */
+internal const val MESSAGE_PLAYBACK_ACCESS = "playback_access"
+
 /**
  * Maps an ExoPlayer error code onto one of the codes the host knows how to translate.
  *
@@ -469,15 +509,24 @@ internal fun playbackMessageCodeFor(errorCode: Int): String = when (errorCode) {
     -> MESSAGE_PLAYBACK_NETWORK
     // A local song whose SAF grant expired, or whose file was moved or deleted, fails exactly here.
     PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND,
-    PlaybackException.ERROR_CODE_IO_NO_PERMISSION,
     -> MESSAGE_PLAYBACK_FILE_MISSING
+    // Present but unreadable: a revoked SAF grant or a protected directory. The fix is different
+    // from re-scanning for a deleted file, so it gets its own sentence.
+    PlaybackException.ERROR_CODE_IO_NO_PERMISSION,
+    -> MESSAGE_PLAYBACK_ACCESS
+    // No extractor/decoder for this container at all: WMA, APE, an exotic hi-res variant, DRM.
     PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
+    PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED,
+    -> MESSAGE_PLAYBACK_UNSUPPORTED_FORMAT
+    // A decoder existed and rejected the bytes: truncated, corrupt, or beyond its capabilities.
     PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
     PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
     PlaybackException.ERROR_CODE_DECODING_FAILED,
     PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES,
-    PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED,
+    -> MESSAGE_PLAYBACK_DECODE
+    // The output device, not the file: AudioTrack could not be created or stopped accepting writes.
     PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED,
-    -> MESSAGE_PLAYBACK_UNSUPPORTED
+    PlaybackException.ERROR_CODE_AUDIO_TRACK_WRITE_FAILED,
+    -> MESSAGE_PLAYBACK_DEVICE
     else -> MESSAGE_PLAYBACK_FAILED
 }

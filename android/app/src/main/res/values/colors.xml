@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="ic_launcher_background">#0B0E17</color>
+    <!-- Matches the top of the icon plate (#0E111B); the play mark is a hole in
+         ic_launcher_foreground, so this colour is what shows through it. -->
+    <color name="ic_launcher_background">#0E111B</color>
 </resources>

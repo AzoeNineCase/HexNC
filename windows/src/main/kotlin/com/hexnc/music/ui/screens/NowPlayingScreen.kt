@@ -1,9 +1,12 @@
 package com.hexnc.music.ui.screens
 
+import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,6 +23,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -36,13 +40,20 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.BlurredEdgeTreatment
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -51,19 +62,32 @@ import com.hexnc.music.data.lyrics.searchKeyword
 import com.hexnc.music.data.model.LyricLine
 import com.hexnc.music.data.model.Lyrics
 import com.hexnc.music.data.model.Song
+import com.hexnc.music.data.model.SongSource
+import com.hexnc.music.data.model.isJapaneseScript
 import com.hexnc.music.data.model.lineProgress
 import com.hexnc.music.data.model.wordProgress
+import com.hexnc.music.data.prefs.AppSettings
 import com.hexnc.music.data.prefs.PlayMode
+import com.hexnc.music.data.repo.GrantedQuality
 import com.hexnc.music.di.AppContainer
 import com.hexnc.music.ui.components.AuroraWash
 import com.hexnc.music.ui.components.Caption
+import com.hexnc.music.ui.components.TimeCaption
 import com.hexnc.music.ui.components.CoverArt
 import com.hexnc.music.ui.components.EmptyState
 import com.hexnc.music.ui.components.LyricSearchSheet
+import com.hexnc.music.ui.components.PlayerOptionsSheet
 import com.hexnc.music.ui.components.MAX_LIST_WIDTH
+import com.hexnc.music.ui.components.SongInfoSheet
 import com.hexnc.music.ui.components.formatDuration
 import com.hexnc.music.ui.i18n.LocalStrings
 import com.hexnc.music.ui.i18n.Strings
+import com.hexnc.music.ui.theme.LocalAuroraTheme
+import com.hexnc.music.ui.theme.Motion
+import com.hexnc.music.ui.theme.Radii
+import com.hexnc.music.ui.theme.Spacing
+import com.hexnc.music.ui.theme.TypeScale
+import coil3.compose.AsyncImage
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.basic.BasicComponent
@@ -84,7 +108,9 @@ import top.yukonga.miuix.kmp.icon.extended.ChevronBackward
 import top.yukonga.miuix.kmp.icon.extended.ChevronForward
 import top.yukonga.miuix.kmp.icon.extended.Favorites
 import top.yukonga.miuix.kmp.icon.extended.FavoritesFill
+import top.yukonga.miuix.kmp.icon.extended.Info
 import top.yukonga.miuix.kmp.icon.extended.ListView
+import top.yukonga.miuix.kmp.icon.extended.More
 import top.yukonga.miuix.kmp.icon.extended.Notes
 import top.yukonga.miuix.kmp.icon.extended.Pause
 import top.yukonga.miuix.kmp.icon.extended.Play
@@ -95,6 +121,18 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
 private const val COVER_SIZE = 268
 private const val COMPACT_COVER_SIZE = 196
 private const val QUEUE_MAX_HEIGHT = 430
+private val PROGRESS_DOCK_HEIGHT = 48.dp
+
+/**
+ * Artwork on the player.
+ *
+ * The old fixed 268 dp read as a thumbnail on a 1600 px-wide window. In the two-column layout the
+ * cover is now [WIDE_COVER_SIZE]; stacked, it is 62% of the window width capped at
+ * [COVER_MAX_SIZE], which keeps the title and transport controls inside the first screenful on a
+ * laptop while filling a phone-shaped window.
+ */
+private val WIDE_COVER_SIZE = 380.dp
+private val COVER_MAX_SIZE = 320.dp
 
 /** Window width from which the player and the lyrics sit side by side instead of stacked. */
 private val WIDE_PLAYER_MIN_WIDTH = 900.dp
@@ -126,9 +164,18 @@ fun NowPlayingScreen(container: AppContainer, onBack: () -> Unit) {
     val snackbarHostState = remember { SnackbarHostState() }
     var showQueue by remember { mutableStateOf(false) }
     var showLyrics by remember { mutableStateOf(true) }
+    var showInfo by remember { mutableStateOf(false) }
+    var showOptions by remember { mutableStateOf(false) }
+    // Immersive mode is a mode, not a control: it hides the chrome and keeps only the artwork and
+    // the lyrics. It is left by tapping the cover, the one surface that stays on screen.
+    var immersive by remember { mutableStateOf(false) }
+    val grantedByTrack by container.netease.granted.collectAsStateWithLifecycle()
 
     Scaffold(
-        topBar = {
+        topBar = topBar@{
+            // Hidden wholesale in immersive mode instead of collapsed: a bar that still reserves its
+            // height would push the cover down for no reason.
+            if (immersive) return@topBar
             SmallTopAppBar(
                 title = strings.nowPlaying,
                 subtitle = song?.album.orEmpty(),
@@ -160,6 +207,27 @@ fun NowPlayingScreen(container: AppContainer, onBack: () -> Unit) {
                             tint = MiuixTheme.colorScheme.onSurface,
                         )
                     }
+                    // The expand action used to be decoration — it is now the song-info sheet, which
+                    // is the one thing a playback page can offer that neither the transport nor the
+                    // queue can: where this track actually comes from.
+                    IconButton(onClick = { showInfo = true }) {
+                        Icon(
+                            imageVector = MiuixIcons.Info,
+                            contentDescription = strings.songInfo,
+                            modifier = Modifier.size(24.dp),
+                            tint = MiuixTheme.colorScheme.onSurface,
+                        )
+                    }
+                    // Rarely used controls hide behind one sheet: the page should not grow a row per
+                    // control, and the volume slider used to own a full-width line of its own here.
+                    IconButton(onClick = { showOptions = true }) {
+                        Icon(
+                            imageVector = MiuixIcons.More,
+                            contentDescription = strings.playerOptions,
+                            modifier = Modifier.size(24.dp),
+                            tint = MiuixTheme.colorScheme.onSurface,
+                        )
+                    }
                 },
             )
         },
@@ -172,6 +240,10 @@ fun NowPlayingScreen(container: AppContainer, onBack: () -> Unit) {
                 strength = 0.95f,
             )
             val track = song
+            // The blurred cover sits *under* every pane: it is what makes the page read as one
+            // surface instead of a gradient with controls on it. It crossfades on a track change,
+            // so skipping a song does not flash white.
+            if (track != null) PlayerBackdrop(track)
             if (track == null) {
                 EmptyState(
                     title = strings.queueEmpty,
@@ -181,13 +253,29 @@ fun NowPlayingScreen(container: AppContainer, onBack: () -> Unit) {
                         .padding(padding)
                         .padding(horizontal = 32.dp),
                 )
+            } else if (immersive) {
+                ImmersivePane(
+                    container = container,
+                    song = track,
+                    strings = strings,
+                    positionMs = snapshot.positionMs,
+                    settings = settings,
+                    onExit = { immersive = false },
+                    modifier = Modifier.fillMaxSize().padding(padding),
+                )
             } else {
                 BoxWithConstraints(
                     modifier = Modifier
                         .fillMaxSize()
-                        .padding(padding),
+                        .padding(padding)
+                        // Leaves the docked seek line its own gutter, so the transport never hides
+                        // behind it when the column is scrolled to the end.
+                        .padding(bottom = PROGRESS_DOCK_HEIGHT),
                 ) {
-                    val player: @Composable (Modifier, Boolean) -> Unit = { paneModifier, compact ->
+                    // Resolved here because `maxWidth` is not reachable from inside the nested
+                    // Column/Row scopes below (the DSL marker hides the BoxWithConstraints receiver).
+                    val stackedCover = (maxWidth * 0.62f).coerceAtMost(COVER_MAX_SIZE)
+                    val player: @Composable (Modifier, Boolean, Dp) -> Unit = { paneModifier, compact, coverSize ->
                         PlayerPane(
                             container = container,
                             song = track,
@@ -199,6 +287,7 @@ fun NowPlayingScreen(container: AppContainer, onBack: () -> Unit) {
                             hasPrevious = snapshot.hasPrevious,
                             hasNext = snapshot.hasNext,
                             compact = compact,
+                            coverSize = coverSize,
                             modifier = paneModifier,
                         )
                     }
@@ -212,6 +301,8 @@ fun NowPlayingScreen(container: AppContainer, onBack: () -> Unit) {
                             lineSpacing = settings.lyricLineSpacing,
                             translationScale = settings.lyricTranslationScale,
                             showTranslation = settings.lyricShowTranslation,
+                            showRoman = settings.lyricShowRoman,
+                            romanScale = settings.lyricRomanScale,
                             onSeek = { container.playback.seekTo(it) },
                             modifier = paneModifier,
                         )
@@ -231,7 +322,7 @@ fun NowPlayingScreen(container: AppContainer, onBack: () -> Unit) {
                                     .fillMaxWidth()
                                     .fillMaxHeight(),
                             ) {
-                                player(Modifier.weight(1f).fillMaxHeight(), false)
+                                player(Modifier.weight(1f).fillMaxHeight(), false, WIDE_COVER_SIZE)
                                 if (showLyrics) {
                                     VerticalDivider(
                                         modifier = Modifier
@@ -251,6 +342,9 @@ fun NowPlayingScreen(container: AppContainer, onBack: () -> Unit) {
                                     .fillMaxWidth()
                                     .weight(if (showLyrics) 0.56f else 1f),
                                 true,
+                                // Narrow window: the artwork is proportional to the width so a small
+                                // window does not end up with a cover taller than the pane.
+                                stackedCover,
                             )
                             if (showLyrics) {
                                 HorizontalDivider(
@@ -262,22 +356,125 @@ fun NowPlayingScreen(container: AppContainer, onBack: () -> Unit) {
                         }
                     }
                 }
+                // The progress line belongs to the page, not to the scrolling column: docked at the
+                // bottom edge it stays reachable while the transport scrolls, and at 3 dp it reads as
+                // a measurement rather than a control competing with the artwork.
+                BottomProgressBar(
+                    positionMs = snapshot.positionMs,
+                    durationMs = snapshot.durationMs,
+                    onSeek = { container.playback.seekTo(it) },
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 8.dp),
+                )
+            }
+            // Both sheets are composed inside the Scaffold's content on purpose: Miuix `Overlay*`
+            // popups resolve against the nearest host scaffold, and a sheet placed after the
+            // Scaffold closes has no host to attach to — which is why the queue button looked dead.
+            if (track != null) {
+                QueueSheet(
+                    show = showQueue,
+                    queue = queue,
+                    currentId = track.id,
+                    strings = strings,
+                    onDismiss = { showQueue = false },
+                    onPick = { index ->
+                        container.playback.seekToIndex(index)
+                        showQueue = false
+                    },
+                )
+                SongInfoSheet(
+                    show = showInfo,
+                    song = track,
+                    strings = strings,
+                    onDismiss = { showInfo = false },
+                    granted = if (track.source == SongSource.NETEASE) {
+                        grantedByTrack[track.neteaseId ?: 0L]
+                    } else {
+                        null
+                    },
+                )
+                PlayerOptionsSheet(
+                    show = showOptions,
+                    strings = strings,
+                    onDismiss = { showOptions = false },
+                    onImmersive = { immersive = true; showLyrics = true },
+                    volume = settings.volume,
+                    onVolume = { container.settings.setVolume(it) },
+                )
             }
         }
     }
+}
 
-    if (song != null) {
-        QueueSheet(
-            show = showQueue,
-            queue = queue,
-            currentId = song?.id,
-            strings = strings,
-            onDismiss = { showQueue = false },
-            onPick = { index ->
-                container.playback.seekToIndex(index)
-                showQueue = false
-            },
-        )
+// ------------------------------------------------------------------ immersive backdrop
+
+/**
+ * The blurred artwork behind the player.
+ *
+ * Three layers, in order: the current cover blurred past legibility (so it reads as colour, not as a
+ * second image), a vertical scrim in the theme background, and an 8% accent wash borrowed from the
+ * aurora gradient so the page still belongs to the active theme. It is crossfaded rather than
+ * switched, because a hard cut on skip flashes.
+ *
+ * The cover is resolved the same way [CoverArt] resolves it — an override file first, then the remote
+ * URL — so the backdrop can never disagree with the artwork in the middle of the page.
+ */
+@Composable
+private fun PlayerBackdrop(song: Song) {
+    val model: Any? = remember(song.coverUrl, song.coverOverridePath) {
+        when {
+            !song.coverOverridePath.isNullOrBlank() ->
+                java.io.File(song.coverOverridePath).takeIf { it.exists() }
+            !song.coverUrl.isNullOrBlank() -> song.coverUrl
+            else -> null
+        }
+    }
+    val aurora = LocalAuroraTheme.current
+    val background = MiuixTheme.colorScheme.background
+    Crossfade(
+        targetState = model,
+        animationSpec = tween(Motion.coverMs, easing = Motion.standard),
+        label = "player-backdrop",
+    ) { current ->
+        Box(Modifier.fillMaxSize()) {
+            if (current != null) {
+                AsyncImage(
+                    model = current,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .blur(72.dp, edgeTreatment = BlurredEdgeTreatment.Unbounded)
+                        .alpha(0.62f),
+                )
+            }
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(
+                                background.copy(alpha = 0.55f),
+                                background.copy(alpha = 0.78f),
+                                background.copy(alpha = 0.94f),
+                            ),
+                        ),
+                    ),
+            )
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(
+                                Color(aurora.accent).copy(alpha = 0.10f),
+                                Color.Transparent,
+                            ),
+                        ),
+                    ),
+            )
+        }
     }
 }
 
@@ -295,14 +492,10 @@ private fun PlayerPane(
     hasPrevious: Boolean,
     hasNext: Boolean,
     compact: Boolean = false,
+    coverSize: Dp = COVER_SIZE.dp,
     modifier: Modifier = Modifier,
 ) {
-    // While the thumb is held the slider follows the finger; the playhead keeps advancing underneath.
-    var dragMs by remember { mutableStateOf<Long?>(null) }
     val scope = rememberCoroutineScope()
-    val settings by container.settings.state.collectAsStateWithLifecycle()
-    val total = durationMs.coerceAtLeast(1L)
-    val shownMs = (dragMs ?: positionMs).coerceIn(0L, total)
 
     Column(
         modifier = modifier
@@ -314,13 +507,16 @@ private fun PlayerPane(
         CoverArt(
             coverUrl = song.coverUrl,
             overridePath = song.coverOverridePath,
-            size = (if (compact) COMPACT_COVER_SIZE else COVER_SIZE).dp,
-            corner = if (compact) 20.dp else 26.dp,
+            size = if (compact) COMPACT_COVER_SIZE.dp else coverSize,
+            corner = Radii.hero,
         )
         Spacer(Modifier.height(if (compact) 18.dp else 28.dp))
         Text(
             text = song.title,
-            style = MiuixTheme.textStyles.title4,
+            style = MiuixTheme.textStyles.title4.copy(
+                fontSize = TypeScale.pageTitle,
+                fontWeight = FontWeight.SemiBold,
+            ),
             color = MiuixTheme.colorScheme.onBackground,
             textAlign = TextAlign.Center,
             maxLines = 2,
@@ -329,30 +525,17 @@ private fun PlayerPane(
         Spacer(Modifier.height(6.dp))
         Text(
             text = song.displayArtist,
-            style = MiuixTheme.textStyles.body2,
-            color = MiuixTheme.colorScheme.onBackgroundVariant,
+            style = MiuixTheme.textStyles.body2.copy(
+                fontSize = TypeScale.artist,
+                fontWeight = FontWeight.Medium,
+            ),
+            color = MiuixTheme.colorScheme.onBackgroundVariant.copy(alpha = 0.6f),
             textAlign = TextAlign.Center,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
 
-        Spacer(Modifier.height(24.dp))
-        Slider(
-            value = shownMs.toFloat(),
-            onValueChange = { dragMs = it.toLong() },
-            onValueChangeFinished = {
-                dragMs?.let { container.playback.seekTo(it) }
-                dragMs = null
-            },
-            valueRange = 0f..total.toFloat(),
-            modifier = Modifier.fillMaxWidth(),
-        )
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Caption(formatDuration(shownMs))
-            Caption(formatDuration(durationMs))
-        }
-
-        Spacer(Modifier.height(18.dp))
+        Spacer(Modifier.height(26.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceEvenly,
@@ -377,6 +560,8 @@ private fun PlayerPane(
             IconButton(
                 onClick = { container.playback.previous() },
                 enabled = hasPrevious,
+                minWidth = 44.dp,
+                minHeight = 44.dp,
             ) {
                 Icon(
                     imageVector = MiuixIcons.ChevronBackward,
@@ -388,9 +573,9 @@ private fun PlayerPane(
             IconButton(
                 onClick = { container.playback.toggle() },
                 backgroundColor = MiuixTheme.colorScheme.primary,
-                cornerRadius = 40.dp,
-                minWidth = 68.dp,
-                minHeight = 68.dp,
+                cornerRadius = Radii.pill,
+                minWidth = 64.dp,
+                minHeight = 64.dp,
             ) {
                 Icon(
                     imageVector = if (isPlaying) MiuixIcons.Pause else MiuixIcons.Play,
@@ -402,6 +587,8 @@ private fun PlayerPane(
             IconButton(
                 onClick = { container.playback.next() },
                 enabled = hasNext,
+                minWidth = 44.dp,
+                minHeight = 44.dp,
             ) {
                 Icon(
                     imageVector = MiuixIcons.ChevronForward,
@@ -424,38 +611,8 @@ private fun PlayerPane(
                 )
             }
         }
-        // Desktop-only: a PC has no volume rocker, so the transport pane carries its own gain.
-        Spacer(Modifier.height(20.dp))
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            IconButton(
-                onClick = {
-                    // Tap-to-mute, matching the speaker key most players put here.
-                    container.settings.setVolume(if (settings.volume > 0f) 0f else 1f)
-                },
-            ) {
-                Icon(
-                    imageVector = MiuixIcons.VolumeUp,
-                    contentDescription = strings.volume,
-                    modifier = Modifier.size(20.dp),
-                    tint = MiuixTheme.colorScheme.onBackgroundVariant,
-                )
-            }
-            Slider(
-                value = settings.volume,
-                onValueChange = { container.settings.setVolume(it) },
-                valueRange = 0f..1f,
-                modifier = Modifier.weight(1f),
-            )
-            Text(
-                text = "${(settings.volume * 100).toInt()}%",
-                style = MiuixTheme.textStyles.footnote1,
-                color = MiuixTheme.colorScheme.onBackgroundVariant,
-            )
-        }
+        // Desktop volume moved into the options sheet: a PC still has no volume rocker, but the gain
+        // is set once per session, and a permanent full-width line was the loudest thing on the page.
         Spacer(Modifier.height(32.dp))
     }
 }
@@ -474,6 +631,146 @@ private fun modeLabel(mode: PlayMode, strings: Strings): String = when (mode) {
     PlayMode.SHUFFLE -> strings.shuffle
 }
 
+// ------------------------------------------------------------------ docked progress
+
+/**
+ * The seek line, docked to the bottom edge of the page.
+ *
+ * It is deliberately thin and outside the scrolling column: inside the column it scrolled away with
+ * the transport, so the one control that answers "where am I" was only reachable after scrolling
+ * back up. The 18 dp box is the touch target — the bar itself stays 3 dp.
+ */
+@Composable
+private fun BottomProgressBar(
+    positionMs: Long,
+    durationMs: Long,
+    onSeek: (Long) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val total = durationMs.coerceAtLeast(1L)
+    var dragMs by remember { mutableStateOf<Long?>(null) }
+    val shownMs = (dragMs ?: positionMs).coerceIn(0L, total)
+    val fraction = (shownMs.toFloat() / total).coerceIn(0f, 1f)
+
+    Column(modifier = modifier.fillMaxWidth().padding(horizontal = Spacing.lg)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            TimeCaption(formatDuration(shownMs))
+            TimeCaption(formatDuration(durationMs))
+        }
+        Spacer(Modifier.height(6.dp))
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(18.dp)
+                .pointerInput(total) {
+                    detectHorizontalDragGestures(
+                        onDragStart = { offset ->
+                            dragMs = ((offset.x / size.width) * total).toLong().coerceIn(0L, total)
+                        },
+                        onDragEnd = {
+                            dragMs?.let(onSeek)
+                            dragMs = null
+                        },
+                        onDragCancel = { dragMs = null },
+                        onHorizontalDrag = { change, _ ->
+                            dragMs = ((change.position.x / size.width) * total)
+                                .toLong()
+                                .coerceIn(0L, total)
+                        },
+                    )
+                },
+            contentAlignment = Alignment.CenterStart,
+        ) {
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(3.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(MiuixTheme.colorScheme.surfaceContainerHigh),
+            )
+            Box(
+                Modifier
+                    .fillMaxWidth(fraction)
+                    .height(3.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(MiuixTheme.colorScheme.primary),
+            )
+        }
+    }
+}
+
+// ------------------------------------------------------------------ immersive mode
+
+/**
+ * Immersive mode: artwork on top, scrolling lyrics underneath, nothing else.
+ *
+ * The cover is the way out — the mode removes every affordance that could carry a button, and a
+ * floating close icon would be exactly the chrome the mode exists to hide — and the tap target is
+ * the artwork itself, which is the largest thing on screen.
+ */
+@Composable
+private fun ImmersivePane(
+    container: AppContainer,
+    song: Song,
+    strings: Strings,
+    positionMs: Long,
+    settings: AppSettings,
+    onExit: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    BoxWithConstraints(modifier = modifier) {
+        val artSize = (maxWidth * 0.42f).coerceIn(140.dp, 300.dp)
+        Column(
+            modifier = Modifier.fillMaxSize(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Spacer(Modifier.height(28.dp))
+            CoverArt(
+                coverUrl = song.coverUrl,
+                overridePath = song.coverOverridePath,
+                modifier = Modifier.clickable(onClick = onExit),
+                size = artSize,
+                corner = Radii.hero,
+            )
+            Spacer(Modifier.height(16.dp))
+            Text(
+                text = song.title,
+                style = MiuixTheme.textStyles.subtitle.copy(fontWeight = FontWeight.SemiBold),
+                color = MiuixTheme.colorScheme.onBackground,
+                textAlign = TextAlign.Center,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(horizontal = 32.dp),
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = song.displayArtist,
+                style = MiuixTheme.textStyles.footnote1,
+                color = MiuixTheme.colorScheme.onBackgroundVariant.copy(alpha = 0.6f),
+                textAlign = TextAlign.Center,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(horizontal = 32.dp),
+            )
+            Spacer(Modifier.height(20.dp))
+            LyricsPane(
+                container = container,
+                song = song,
+                strings = strings,
+                positionMs = positionMs,
+                fontSizeSp = settings.lyricFontSizeSp,
+                lineSpacing = settings.lyricLineSpacing,
+                translationScale = settings.lyricTranslationScale,
+                showTranslation = settings.lyricShowTranslation,
+                showRoman = settings.lyricShowRoman,
+                romanScale = settings.lyricRomanScale,
+                onSeek = { container.playback.seekTo(it) },
+                modifier = Modifier.fillMaxWidth().weight(1f),
+            )
+        }
+    }
+}
+
 // ------------------------------------------------------------------ lyrics pane
 
 @Composable
@@ -486,6 +783,8 @@ private fun LyricsPane(
     lineSpacing: Float,
     translationScale: Float,
     showTranslation: Boolean,
+    showRoman: Boolean,
+    romanScale: Float,
     onSeek: (Long) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -613,6 +912,8 @@ private fun LyricsPane(
                     lineSpacing = lineSpacing,
                     translationScale = translationScale,
                     showTranslation = showTranslation,
+                    showRoman = showRoman,
+                    romanScale = romanScale,
                     onSeek = null,
                 )
             }
@@ -692,6 +993,8 @@ private fun LyricsPane(
                     lineSpacing = lineSpacing,
                     translationScale = translationScale,
                     showTranslation = showTranslation,
+                    showRoman = showRoman,
+                    romanScale = romanScale,
                     onSeek = onSeek,
                 )
             }
@@ -726,6 +1029,8 @@ private fun LyricLineRow(
     lineSpacing: Float,
     translationScale: Float,
     showTranslation: Boolean,
+    showRoman: Boolean,
+    romanScale: Float,
     onSeek: ((Long) -> Unit)?,
 ) {
     val emphasis by animateFloatAsState(
@@ -758,7 +1063,7 @@ private fun LyricLineRow(
                     Modifier.clickable { onSeek((line.timeMs - offsetMs).coerceAtLeast(0L)) }
                 },
             )
-            .padding(vertical = 8.dp),
+            .padding(vertical = 10.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         LyricText(
@@ -771,15 +1076,42 @@ private fun LyricLineRow(
             idleColor = idleColor,
             weight = if (isActive) FontWeight.SemiBold else FontWeight.Normal,
         )
+        // Two optional sub-lines under the original. Each is laid out only when it exists, so a
+        // Japanese sheet with no translation leaves no gap where one would have been, and a Chinese
+        // sheet with a translation reserves no room for a romaji line it never has.
+        val strings = LocalStrings.current
         val translation = line.translation
-        if (showTranslation && !translation.isNullOrBlank()) {
-            Spacer(Modifier.height(3.dp))
+        val hasTranslation = showTranslation && !translation.isNullOrBlank()
+        val roman = line.roman
+        val hasRoman = showRoman && !roman.isNullOrBlank()
+        // A Japanese line whose service entry carries no `romalrc` says so instead of silently
+        // showing two lines: an incomplete sheet and a broken setting look identical otherwise.
+        val romanPlaceholder = showRoman && !hasRoman && line.isJapaneseScript
+
+        // The active line is the one being sung, so its sub-lines brighten with it and fall back when
+        // it passes. Romaji sits a shade below the translation: it is a reading aid for the line
+        // above, not a second translation.
+        val translationAlpha = if (isActive) 0.78f else 0.62f
+        val romanAlpha = if (isActive) 0.70f else 0.52f
+
+        if (hasTranslation) {
+            Spacer(Modifier.height(4.dp))
             Text(
-                text = translation,
+                text = translation.orEmpty(),
                 fontSize = (size * translationScale).sp,
                 lineHeight = (size * translationScale * lineSpacing).sp,
-                color = if (isActive) MiuixTheme.colorScheme.onBackground
-                else MiuixTheme.colorScheme.outline,
+                color = MiuixTheme.colorScheme.onBackground.copy(alpha = translationAlpha),
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+        if (hasRoman || romanPlaceholder) {
+            Spacer(Modifier.height(if (hasTranslation) 2.dp else 4.dp))
+            Text(
+                text = if (hasRoman) roman.orEmpty() else strings.noRomanYet,
+                fontSize = (size * romanScale).sp,
+                lineHeight = (size * romanScale * lineSpacing).sp,
+                color = MiuixTheme.colorScheme.onBackground.copy(alpha = romanAlpha),
                 textAlign = TextAlign.Center,
                 modifier = Modifier.fillMaxWidth(),
             )

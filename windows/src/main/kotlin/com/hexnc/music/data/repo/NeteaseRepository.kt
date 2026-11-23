@@ -1,7 +1,9 @@
 package com.hexnc.music.data.repo
 
+import com.hexnc.music.data.db.CachedAlbum
 import com.hexnc.music.data.db.LyricDao
 import com.hexnc.music.data.db.LyricDao.Origin
+import com.hexnc.music.data.db.NeteaseAlbumDao
 import com.hexnc.music.data.db.PlaylistDao
 import com.hexnc.music.data.db.SongDao
 import com.hexnc.music.data.local.LrcParser
@@ -11,15 +13,16 @@ import com.hexnc.music.data.model.Playlist
 import com.hexnc.music.data.model.PlaylistSource
 import com.hexnc.music.data.model.Song
 import com.hexnc.music.data.model.SongSource
-import com.hexnc.music.data.netease.NcAlbum
 import com.hexnc.music.data.netease.NeteaseApi
 import com.hexnc.music.data.netease.NeteaseClient
 import com.hexnc.music.data.netease.NeteaseCookieStore
 import com.hexnc.music.data.netease.NeteaseException
+import com.hexnc.music.data.netease.NcAlbum
 import com.hexnc.music.data.netease.NcLyricResponse
 import com.hexnc.music.data.netease.NcPlaylist
 import com.hexnc.music.data.netease.NcSearchResult
 import com.hexnc.music.data.netease.NcSong
+import com.hexnc.music.data.netease.NcSongUrl
 import com.hexnc.music.data.netease.intOrNull
 import com.hexnc.music.data.netease.parseCookieInput
 import com.hexnc.music.data.netease.trackIdList
@@ -28,6 +31,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlin.random.Random
 
@@ -107,7 +113,7 @@ data class QrPoll(
 }
 
 /** What a sync is currently doing, for the progress indicator. */
-enum class SyncPhase { PLAYLISTS, TRACKS, LYRICS, CLEANUP, DONE }
+enum class SyncPhase { PLAYLISTS, TRACKS, ALBUMS, LYRICS, CLEANUP, DONE }
 
 data class SyncProgress(
     val phase: SyncPhase,
@@ -124,14 +130,59 @@ data class SyncReport(
     val tracks: Int = 0,
     val newTracks: Int = 0,
     val lyrics: Int = 0,
+    /** Favourited albums written to the cache; 0 when the album read failed (see [failures]). */
+    val albums: Int = 0,
+    /** Playlists left untouched because their track count had not changed since the last sync. */
+    val skipped: Int = 0,
     val removedPlaylists: Int = 0,
+    /** Non-fatal problems. A sync with entries here still applied everything else. */
     val failures: List<String> = emptyList(),
 ) {
     val isClean: Boolean get() = failures.isEmpty()
 }
 
+/** One page of the favourited-album listing, with the paging metadata the UI needs. */
+data class AlbumPage(
+    val albums: List<NcAlbum> = emptyList(),
+    /** Server-side total, when the reply carried one. */
+    val total: Int? = null,
+    /** Whether another page exists, by either transport's flag. */
+    val more: Boolean = false,
+    val offset: Int = 0,
+    val code: Int = 200,
+)
+
+/**
+ * What the service actually returned for a track, as opposed to the tier that was requested.
+ *
+ * The desktop client asks for `hires` and receives the best it is entitled to, which may be a
+ * 24-bit FLAC, a 16-bit FLAC, a 320 kbps MP3 or, for tracks whose copyright never licensed a
+ * lossless master, nothing better than 128 kbps. Nothing in the UI should claim a tier the service
+ * did not grant, so the granted container and bitrate travel with the stream.
+ */
+data class GrantedQuality(
+    val container: String,
+    /** Bits per second, as reported by the service; 0 when it did not say. */
+    val bitrate: Int,
+    val level: String,
+) {
+    /** True when the track plays below lossless, i.e. when "无损" was refused. */
+    val belowLossless: Boolean
+        get() = level.lowercase() !in LOSSLESS_LEVELS
+
+    companion object {
+        private val LOSSLESS_LEVELS = setOf("lossless", "hires")
+    }
+}
+
 /** A stream URL together with the moment it stops being usable. */
 private data class CachedStream(val url: String, val expiresAtMs: Long, val level: String)
+
+/** How long a completed sync is considered fresh enough for the automatic launch pass. */
+private const val AUTO_SYNC_INTERVAL_MS = 10L * 60L * 1000L
+
+/** Hard cap on the album listing, so a lying paging flag cannot loop forever. */
+private const val MAX_ALBUM_PAGES = 20
 
 /**
  * NetEase Cloud Music: account, library sync, search and streaming.
@@ -151,7 +202,20 @@ class NeteaseRepository(
     private val playlists: PlaylistDao,
     private val lyrics: LyricDao,
     private val library: LibraryRepository,
+    private val albums: NeteaseAlbumDao,
 ) {
+
+    /**
+     * Serialises syncs.
+     *
+     * The launch refresh and the "sync now" button can fire at the same moment; without a lock they
+     * interleave their membership writes, and the reconcile step of the slower one then deletes rows
+     * the faster one had just added.
+     */
+    private val syncLock = Mutex()
+
+    /** Page size for the album listing; the service silently caps anything above 100. */
+    private val albumPageSize = 100
 
     private val _session = MutableStateFlow(NeteaseSession.SIGNED_OUT)
 
@@ -160,6 +224,17 @@ class NeteaseRepository(
 
     /** Stream URLs expire after about twenty minutes, so they are cached only briefly. */
     private val streamCache = HashMap<Long, CachedStream>()
+
+    private val _granted = MutableStateFlow<Map<Long, GrantedQuality>>(emptyMap())
+
+    /**
+     * The tier the service granted for each recently resolved track, newest last.
+     *
+     * Kept as state rather than a single "last" value because the player resolves a whole queue in
+     * one batch: a screen showing one song must be able to ask about *that* song, not about whichever
+     * entry happened to come back last.
+     */
+    val granted: StateFlow<Map<Long, GrantedQuality>> = _granted.asStateFlow()
 
     // ------------------------------------------------------------------ session
 
@@ -304,6 +379,14 @@ class NeteaseRepository(
         withLyrics: Boolean = false,
         dropRemoved: Boolean = false,
         onProgress: (SyncProgress) -> Unit = {},
+    ): Result<SyncReport> = syncLock.withLock {
+        syncLibraryLocked(withLyrics, dropRemoved, onProgress)
+    }
+
+    private suspend fun syncLibraryLocked(
+        withLyrics: Boolean,
+        dropRemoved: Boolean,
+        onProgress: (SyncProgress) -> Unit,
     ): Result<SyncReport> = withContext(Dispatchers.IO) {
         runCatching {
             val account = refreshSession()
@@ -335,9 +418,24 @@ class NeteaseRepository(
             // `/api/user/playlist` lists the playlists but carries no usable track data: every
             // entry has `tracks: null` and no `trackIds` key at all, so the ids have to be fetched
             // per playlist. `trackIds` on `/api/v6/playlist/detail` is complete and ordered.
+            // ---- which playlists actually need a detail read ----------------
+            // An unchanged `trackCount` is the cheap signal that nothing was added or removed
+            // server-side. Re-reading every playlist's ids on every launch is what made the old
+            // "sync" feel like a full download; the incremental pass touches only what moved.
+            val unchanged = remote.filter { nc ->
+                val stored = playlists.byNeteaseId(nc.id)
+                stored != null && nc.trackCount > 0 && stored.trackCount == nc.trackCount &&
+                    stored.syncedAt > 0
+            }.map { it.id }.toHashSet()
+
             val perPlaylistIds = LinkedHashMap<Long, List<Long>>(remote.size)
+            val partial = HashSet<Long>()
             onProgress(SyncProgress(SyncPhase.PLAYLISTS, 0, remote.size))
             remote.forEachIndexed { index, nc ->
+                if (nc.id in unchanged) {
+                    onProgress(SyncProgress(SyncPhase.PLAYLISTS, index + 1, remote.size, nc.name))
+                    return@forEachIndexed
+                }
                 val detail = runCatching { paced { api.playlistDetail(nc.id) } }
                     .getOrElse { error ->
                         failures += "${nc.name}: ${error.message}"
@@ -348,12 +446,14 @@ class NeteaseRepository(
                 if (detail != null) {
                     val ids = detail.trackIdList()
                     if (ids.size < nc.trackCount) {
-                        // Fewer ids than the listing advertises. Reconciling a short list would
-                        // delete real membership rows, so this playlist is reported, not touched.
+                        // Fewer ids than the listing advertises: a track has lost copyright and is
+                        // absent from `trackIds`. The list is still merged — append-only, because
+                        // reconciling a short list would delete real membership — so the rest of
+                        // the playlist syncs instead of the whole playlist being dropped.
                         failures += "${nc.name}: ${ids.size}/${nc.trackCount} tracks"
-                    } else {
-                        perPlaylistIds[nc.id] = ids
+                        partial += nc.id
                     }
+                    perPlaylistIds[nc.id] = ids
                 }
                 onProgress(SyncProgress(SyncPhase.PLAYLISTS, index + 1, remote.size, nc.name))
             }
@@ -398,8 +498,15 @@ class NeteaseRepository(
                 remote.forEach { nc ->
                     val ids = perPlaylistIds[nc.id] ?: return@forEach
                     val songIds = ids.mapNotNull { idByNetease[it] }
-                    playlists.reconcileMembers(Ids.neteasePlaylistId(nc.id), songIds)
-                    playlists.setSyncedAt(Ids.neteasePlaylistId(nc.id), now)
+                    val localId = Ids.neteasePlaylistId(nc.id)
+                    // A short id list can only be trusted to *add*: removing from it would delete
+                    // tracks that are merely unlisted, not gone.
+                    if (nc.id in partial) {
+                        playlists.appendMissing(localId, songIds)
+                    } else {
+                        playlists.reconcileMembers(localId, songIds)
+                    }
+                    playlists.setSyncedAt(localId, now)
                 }
             }
 
@@ -419,6 +526,19 @@ class NeteaseRepository(
                 }
             }
 
+            // ---- favourited albums ----------------------------------------
+            // Read as part of the library sync rather than on page entry: the page then renders
+            // from cache, and a failed read degrades to "stale + retry" instead of "no albums".
+            var albumCount = 0
+            onProgress(SyncProgress(SyncPhase.ALBUMS, 0, 1))
+            runCatching { fetchAllAlbums() }
+                .onSuccess { albumCount = it.size }
+                .onFailure { failures += "albums: ${it.message}" }
+            onProgress(SyncProgress(SyncPhase.ALBUMS, 1, 1))
+
+            // Records the timestamp only; it never gates the next sync.
+            cookieStore.markLibrarySynced(account.userId)
+
             onProgress(SyncProgress(SyncPhase.DONE, 1, 1))
             library.notifyExternalChange()
 
@@ -427,6 +547,8 @@ class NeteaseRepository(
                 tracks = mappedSongs.size,
                 newTracks = inserted,
                 lyrics = lyricCount,
+                albums = albumCount,
+                skipped = unchanged.size,
                 removedPlaylists = removed,
                 failures = failures,
             )
@@ -434,20 +556,26 @@ class NeteaseRepository(
     }
 
     /**
-     * Imports the signed-in account's playlists once per account.
+     * Runs the automatic sync when the account has not synced recently enough.
      *
-     * Called when the UI observes a sign-in, so that "登录后" really does pull the liked, own and
-     * subscribed playlists in without the user having to find the refresh button. Returns `null`
-     * when there is nothing to do — signed out, or this account has already been imported — so
-     * callers can stay silent. A failed attempt forgets the marker, so the next launch retries.
+     * This replaces the old one-shot "import once per account" marker. That marker was the whole
+     * reason a phone-side playlist change never arrived until the app was wiped and the account
+     * signed in again: the second launch of an account was silently skipped, and the only thing that
+     * cleared the marker was a full data wipe. The timestamp is now used purely to decide whether a
+     * refresh is *due*, so a sync can always be forced by the button and the launch pass simply
+     * skips when it just ran.
+     *
+     * @return `null` when signed out or when a sync finished less than [minIntervalMs] ago.
      */
-    suspend fun importLibraryOnce(onProgress: (SyncProgress) -> Unit = {}): Result<SyncReport>? {
+    suspend fun syncLibraryIfDue(
+        minIntervalMs: Long = AUTO_SYNC_INTERVAL_MS,
+        onProgress: (SyncProgress) -> Unit = {},
+    ): Result<SyncReport>? {
         val account = refreshSession()
         if (!account.isSignedIn) return null
-        if (!cookieStore.claimLibraryImport(account.userId)) return null
-        val result = syncLibrary(withLyrics = false, onProgress = onProgress)
-        if (result.isFailure) cookieStore.forgetLibraryImport()
-        return result
+        val last = cookieStore.lastLibrarySyncAt(account.userId)
+        if (last > 0L && System.currentTimeMillis() - last < minIntervalMs) return null
+        return syncLibrary(withLyrics = false, onProgress = onProgress)
     }
 
     /** Re-syncs one playlist in place. Returns the number of tracks now in it. */
@@ -548,18 +676,17 @@ class NeteaseRepository(
     }
 
     /**
-     * Fetches the stored lyric sheet for a chosen NetEase match.
+     * Fetches lyrics for a NetEase track that the user picked from an **online search** rather than
+     * from their own account — the case of a local file matched to a catalogue entry.
      *
-     * A local file has no `neteaseId`, so [refreshLyrics] cannot be used for it: the online search
-     * picks a song in the catalogue and only the caller knows which one, which is why the id is a
-     * parameter here instead of being read off the [Song] row.
-     *
-     * @return true when anything was stored — including the "pure music" / "uncollected" markers,
-     *   which carry no text but are still a real answer and must not surface as a network failure.
+     * [refreshLyrics] cannot serve this: it reads `song.neteaseId`, which a local file does not have.
      */
     suspend fun importLyricsFor(songId: String, neteaseId: Long): Boolean = withContext(Dispatchers.IO) {
         val stored = runCatching { downloadLyrics(songId, neteaseId) }.getOrDefault(false)
         library.notifyExternalChange()
+        // A `false` from [downloadLyrics] also covers the instrumental and uncollected answers, which
+        // *did* store a marker the UI can explain. Reporting those as failure would make the caller
+        // blame the network for a track that simply has no lyrics.
         stored || lyrics.has(songId)
     }
 
@@ -599,7 +726,43 @@ class NeteaseRepository(
             level = entry.level.orEmpty(),
         )
         lastGrantedLevel = entry.level.orEmpty()
+        recordGranted(entry)
         url
+    }
+
+    /**
+     * The raw URL record for one track, for callers that need more than the URL itself.
+     *
+     * Playback only cares about the address, but downloading has to know the container
+     * ([NcSongUrl.type]) and the granted tier, because a "standard" request can legitimately come
+     * back as FLAC and a file must never be labelled with an extension it does not have.
+     *
+     * Deliberately does not consult [streamCache]: a cached entry only carries the URL, and a
+     * download wants the freshly reported size and container.
+     */
+    suspend fun streamEntry(neteaseId: Long, level: String = "standard"): NcSongUrl? =
+        withContext(Dispatchers.IO) {
+            if (neteaseId <= 0L) return@withContext null
+            runCatching { paced { api.songUrl(listOf(neteaseId), level) } }
+                .getOrNull()
+                ?.let { results -> results.firstOrNull { it.id == neteaseId } ?: results.firstOrNull() }
+        }
+
+    /** Remembers one grant; the map is bounded so a long session cannot grow without limit. */
+    private fun recordGranted(entry: NcSongUrl) {
+        if (entry.id <= 0L) return
+        val granted = GrantedQuality(
+            container = (entry.type ?: entry.encodeType ?: "").lowercase(),
+            bitrate = entry.br,
+            level = entry.level.orEmpty(),
+        )
+        _granted.update { current ->
+            val next = LinkedHashMap(current)
+            next.remove(entry.id)
+            next[entry.id] = granted
+            while (next.size > GRANTED_MEMORY) next.remove(next.keys.first())
+            next
+        }
     }
 
     /** The tier the service actually granted on the most recent [streamUrl] call. */
@@ -638,6 +801,7 @@ class NeteaseRepository(
                         expiresAtMs = System.currentTimeMillis() + ttl - STREAM_TTL_MARGIN_MS,
                         level = entry.level.orEmpty(),
                     )
+                    recordGranted(entry)
                     out[entry.id] = url
                 }
             }
@@ -697,17 +861,122 @@ class NeteaseRepository(
         }
 
     /**
-     * The albums the signed-in account has favourited, newest first.
+     * One page of the albums the signed-in account has favourited.
      *
-     * Pulled as one generous paced page rather than by following `hasMore` down a dozen of them: a
-     * sublist is a browse surface, and a single read is both cheaper and kinder to a service that
-     * answers bursts with a zero-byte 200. Nothing is written to the database here — the caller
-     * imports an album only when the user opens it.
+     * Kept separate from the cache write so the page can keep scrolling through a listing without
+     * replacing what it already shows: the reply carries the server `total`, which is the only way to
+     * know whether "one page" means "one page of many" or "that is all there is".
      */
-    suspend fun favouriteAlbums(limit: Int = 200): Result<List<NcAlbum>> =
+    suspend fun favouriteAlbumsPage(offset: Int = 0, limit: Int = 100): Result<AlbumPage> =
         withContext(Dispatchers.IO) {
-            runCatching { paced { api.albumSublist(limit = limit) }.albums.take(limit) }
+            runCatching {
+                val response = paced { api.albumSublist(limit = limit, offset = offset) }
+                AlbumPage(
+                    albums = response.albums,
+                    total = response.total,
+                    more = response.morePages,
+                    offset = offset,
+                    code = response.code,
+                )
+            }
         }
+
+    /** The cached favourited albums, in the order the service listed them. */
+    fun cachedFavouriteAlbums(): List<CachedAlbum> = albums.all()
+
+    /** When the album cache was last written; 0 means it never was. */
+    fun albumsSyncedAt(): Long = albums.lastSyncedAt()
+
+    /** Re-reads every page of the listing and replaces the cache. Returns the album count. */
+    suspend fun refreshFavouriteAlbums(): Result<Int> = withContext(Dispatchers.IO) {
+        runCatching { fetchAllAlbums().size }
+    }
+
+    /**
+     * Walks the whole favourited-album listing and writes it to the cache.
+     *
+     * Three independent stop conditions, because each transport lies differently: the server `total`
+     * (absent on the plain gateway), the `hasMore`/`more` flag (absent or wrong on some replies), and
+     * a short page (the only signal that survives both). A cap keeps a misbehaving reply from looping
+     * forever.
+     *
+     * Duplicates are folded by id, and the server's order is preserved, so re-reading is idempotent.
+     */
+    private suspend fun fetchAllAlbums(): List<CachedAlbum> {
+        val now = System.currentTimeMillis()
+        val collected = LinkedHashMap<Long, CachedAlbum>()
+        var offset = 0
+        var page = 0
+        while (page < MAX_ALBUM_PAGES) {
+            val response = paced { api.albumSublist(limit = albumPageSize, offset = offset) }
+            if (response.albums.isEmpty()) break
+            response.albums.forEach { collected[it.id] = it.toCachedAlbum(now) }
+            offset += response.albums.size
+            if (isLastAlbumPage(response.albums.size, response.total, response.morePages, offset, albumPageSize)) {
+                break
+            }
+            page++
+        }
+        val out = collected.values.toList()
+        albums.replaceAll(out)
+        return out
+    }
+
+    private fun NcAlbum.toCachedAlbum(now: Long): CachedAlbum = CachedAlbum(
+        id = id,
+        name = name,
+        artistName = artistName,
+        coverUrl = picUrl,
+        trackCount = size,
+        publishTime = 0L,
+        syncedAt = now,
+    )
+
+    /**
+     * The albums [artistName] has released, for the artist detail page.
+     *
+     * Read-only on purpose: opening a discography must not import it. The caller materialises just
+     * the one album the user taps, through [importAlbum], so a page view costs a single request and
+     * leaves the library untouched.
+     *
+     * A NetEase id turns this into a direct lookup. Without one — the artist exists only in the
+     * local library, or was parsed out of a file tag — the album catalogue is searched by name and
+     * the entries whose credited artist matches are kept. That match is a filter rather than a
+     * lookup, so it compares the whole trimmed name case-insensitively instead of accepting a
+     * prefix: "Jay" must not pull in "Jay-Z".
+     */
+    suspend fun artistAlbums(
+        artistName: String,
+        neteaseArtistId: Long? = null,
+        limit: Int = 50,
+    ): Result<List<NcAlbum>> = withContext(Dispatchers.IO) {
+        runCatching {
+            val name = artistName.trim()
+            // An id of 0 is what a missing NetEase link looks like after a bad map, not an artist.
+            val resolvedId = neteaseArtistId?.takeIf { it > 0L }
+            val albums = when {
+                resolvedId != null -> paced { api.artistAlbums(resolvedId, limit = limit) }.hotAlbums
+                name.isEmpty() -> emptyList()
+                else -> paced { api.searchAlbums(name, limit = limit) }
+                    .filter { it.matchesArtist(name) }
+            }
+            // The same release can be returned twice across pages of a search; the id is the only
+            // stable identity NetEase offers, so de-duplicating on it is what keeps rows unique.
+            albums.distinctBy { it.id }.take(limit)
+        }
+    }
+
+    /**
+     * True when any credited artist on this album is [name].
+     *
+     * Both shapes are consulted because the endpoints disagree: album detail and artist albums send
+     * the singular `artist`, while list responses send the plural `artists`.
+     */
+    private fun NcAlbum.matchesArtist(name: String): Boolean {
+        if (name.isEmpty()) return false
+        val credited = artists.map { it.name } + listOfNotNull(artist?.name)
+        return credited.any { it.trim().equals(name, ignoreCase = true) }
+    }
 
     /** Adds the current top songs of a NetEase artist to the local library. */
     suspend fun importArtistTopSongs(artistId: Long, withLyrics: Boolean = false): Result<Int> =
@@ -778,7 +1047,10 @@ class NeteaseRepository(
         const val QR_TIMEOUT_MS = 5 * 60 * 1000L
         const val READ_MIN_MS = 300L
         const val READ_JITTER_MS = 500L
-        const val DEFAULT_STREAM_TTL_S = 1200L
+        /** How many resolved tracks keep their granted tier in memory. */
+    private const val GRANTED_MEMORY = 256
+
+    const val DEFAULT_STREAM_TTL_S = 1200L
         const val STREAM_TTL_MARGIN_MS = 60_000L
     }
 }
@@ -788,3 +1060,36 @@ fun Throwable.neteaseCode(): Int? = (this as? NeteaseException)?.code
 
 /** True when the failure means "sign in first" rather than "something went wrong". */
 fun Throwable.isAuthFailure(): Boolean = neteaseCode()?.let { it == 301 || it == -462 || it == -460 } == true
+
+/**
+ * Whether the page just read is the last page of the favourited-album listing.
+ *
+ * Kept as a pure function because this decision is the one that was wrong before: the listing used
+ * to be a single `limit = 200` call, which the service silently caps at 100 entries, so any account
+ * with more than 100 favourite albums lost the tail with no error. Three independent signals now
+ * answer "are we done" — the `total` count (missing on the plain gateway), the `hasMore`/`more` flag
+ * (wrong or absent on some replies), and a short page — and their precedence is what this function
+ * pins down:
+ *
+ *  - an empty page is always the end, whatever the flags claim;
+ *  - a known `total` reached by `offset` ends the walk, even if `more` is (wrongly) true;
+ *  - otherwise a short page ends it only when `more` is false: a full page with no flag cannot be
+ *    trusted, because the service answers `hasMore = false` for every page in some versions.
+ *
+ * @param received entries in this page, after de-duplication by the caller is not required.
+ * @param total server-reported total, or null when the transport does not carry it.
+ * @param more the server's "there is another page" flag.
+ * @param offset number of entries consumed so far, *including* this page.
+ * @param pageSize the page size that was requested (after the transport's own clamping).
+ */
+internal fun isLastAlbumPage(
+    received: Int,
+    total: Int?,
+    more: Boolean,
+    offset: Int,
+    pageSize: Int,
+): Boolean {
+    if (received <= 0) return true
+    if (total != null && total > 0 && offset >= total) return true
+    return !more && received < pageSize
+}

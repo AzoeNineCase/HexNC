@@ -15,29 +15,39 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hexnc.music.di.AppContainer
 import com.hexnc.music.playback.MESSAGE_NO_PLAYABLE
+import com.hexnc.music.playback.MESSAGE_PLAYBACK_ACCESS
 import com.hexnc.music.playback.MESSAGE_PLAYBACK_CLEARTEXT
+import com.hexnc.music.playback.MESSAGE_PLAYBACK_DECODE
+import com.hexnc.music.playback.MESSAGE_PLAYBACK_DEVICE
 import com.hexnc.music.playback.MESSAGE_PLAYBACK_DSD
 import com.hexnc.music.playback.MESSAGE_PLAYBACK_DSD_DECODING
 import com.hexnc.music.playback.MESSAGE_PLAYBACK_FAILED
 import com.hexnc.music.playback.MESSAGE_PLAYBACK_FILE_MISSING
 import com.hexnc.music.playback.MESSAGE_PLAYBACK_NETWORK
 import com.hexnc.music.playback.MESSAGE_PLAYBACK_UNSUPPORTED
+import com.hexnc.music.playback.MESSAGE_PLAYBACK_UNSUPPORTED_FORMAT
 import com.hexnc.music.ui.components.AuroraWash
+import com.hexnc.music.ui.components.DownloadSheet
 import com.hexnc.music.ui.components.MiniPlayerBar
+import com.hexnc.music.ui.components.downloadConfig
 import com.hexnc.music.ui.i18n.Language
 import com.hexnc.music.ui.i18n.LocalStrings
 import com.hexnc.music.ui.i18n.Strings
 import com.hexnc.music.ui.screens.AlbumDetailScreen
 import com.hexnc.music.ui.screens.ArtistDetailScreen
 import com.hexnc.music.ui.screens.LibraryScreen
+import com.hexnc.music.ui.screens.LibrarySectionScreen
+import com.hexnc.music.ui.screens.NeteaseAlbumsScreen
 import com.hexnc.music.ui.screens.NowPlayingScreen
 import com.hexnc.music.ui.screens.PlaylistDetailScreen
 import com.hexnc.music.ui.screens.PlaylistsScreen
@@ -93,14 +103,17 @@ fun HexNCRoot(container: AppContainer) {
             val playback = container.playback
             val pendingMessage by playback.messages.collectAsStateWithLifecycle()
             val session by container.netease.session.collectAsStateWithLifecycle()
+            val downloadState by container.downloads.state.collectAsStateWithLifecycle()
+            var showDownloads by remember { mutableStateOf(false) }
 
-            // Signing in must actually bring the account's library in — the liked playlist, the
-            // user's own playlists and the subscribed ones — instead of leaving an empty list until
-            // the refresh button is found. `importLibraryOnce` is a no-op for an account that has
-            // already been imported, so this cannot turn into a full sync on every launch.
+            // Signing in must actually bring the account's library in — the liked playlist, the user's own
+            // playlists and the subscribed ones — instead of leaving an empty list until the refresh
+            // button is found. This is now time-gated rather than one-shot: a sync that already ran
+            // within the last few minutes is skipped, but a later launch refreshes again, so a
+            // playlist added on the phone eventually shows up without wiping the app.
             LaunchedEffect(session.userId) {
                 if (!session.isSignedIn) return@LaunchedEffect
-                val result = container.netease.importLibraryOnce() ?: return@LaunchedEffect
+                val result = container.netease.syncLibraryIfDue() ?: return@LaunchedEffect
                 result
                     .onSuccess { report ->
                         snackbarHostState.showSnackbar(
@@ -119,7 +132,11 @@ fun HexNCRoot(container: AppContainer) {
                     MESSAGE_PLAYBACK_CLEARTEXT -> strings.playbackCleartext
                     MESSAGE_PLAYBACK_NETWORK -> strings.playbackNetwork
                     MESSAGE_PLAYBACK_FILE_MISSING -> strings.playbackFileMissing
+                    MESSAGE_PLAYBACK_ACCESS -> strings.playbackAccessError
                     MESSAGE_PLAYBACK_UNSUPPORTED -> strings.playbackUnsupported
+                    MESSAGE_PLAYBACK_UNSUPPORTED_FORMAT -> strings.playbackUnsupportedFormat
+                    MESSAGE_PLAYBACK_DECODE -> strings.playbackDecodeError
+                    MESSAGE_PLAYBACK_DEVICE -> strings.playbackDeviceError
                     MESSAGE_PLAYBACK_DSD -> strings.playbackDsd
                     MESSAGE_PLAYBACK_DSD_DECODING -> strings.playbackDsdDecoding
                     MESSAGE_PLAYBACK_FAILED -> strings.playbackUnknown
@@ -127,6 +144,12 @@ fun HexNCRoot(container: AppContainer) {
                 }
                 snackbarHostState.showSnackbar(text)
                 playback.consumeMessage()
+            }
+
+            // A batch download owns the screen while it runs: the panel opens itself so progress and
+            // any "no copyright" rows are visible without hunting for the sheet.
+            LaunchedEffect(downloadState.total, downloadState.running) {
+                if (downloadState.total > 0) showDownloads = true
             }
 
             val navigate: (Route) -> Unit = { route ->
@@ -137,7 +160,11 @@ fun HexNCRoot(container: AppContainer) {
                     if (backStack.firstOrNull() != route) {
                         if (backStack.isEmpty()) backStack.add(route) else backStack[0] = route
                     }
-                } else {
+                } else if (backStack.lastOrNull() != route) {
+                    // Pushing a route that is already on top is never what the user meant, and
+                    // Miuix's NavDisplay throws "Duplicate contentKey on the back stack" when two
+                    // entries share a key. That exception is raised inside a composition frame, so
+                    // it takes the whole screen down. A same-route tap is now a no-op.
                     backStack.add(route)
                 }
             }
@@ -165,7 +192,13 @@ fun HexNCRoot(container: AppContainer) {
                     AlbumDetailScreen(container, route.album, route.artist, snackbarHostState, navigate, goBack)
                 }
                 entry<Route.ArtistDetail> { route ->
-                    ArtistDetailScreen(container, route.artist, snackbarHostState, navigate, goBack)
+                    ArtistDetailScreen(container, route.artist, route.neteaseArtistId, snackbarHostState, navigate, goBack)
+                }
+                entry<Route.LibrarySection> { route ->
+                    LibrarySectionScreen(container, route.section, snackbarHostState, navigate, goBack)
+                }
+                entry<Route.NeteaseAlbums> {
+                    NeteaseAlbumsScreen(container, snackbarHostState, navigate, goBack)
                 }
                 entry<Route.SignIn> {
                     SignInScreen(container, snackbarHostState, goBack)
@@ -174,6 +207,18 @@ fun HexNCRoot(container: AppContainer) {
                     NowPlayingScreen(container, goBack)
                 }
             }
+
+            DownloadSheet(
+                show = showDownloads,
+                state = downloadState,
+                strings = strings,
+                onCancel = { container.downloads.cancel() },
+                onRetry = { container.downloads.retryFailed(downloadConfig(container, strings)) },
+                onClose = {
+                    showDownloads = false
+                    container.downloads.clearResult()
+                },
+            )
         }
     }
 }

@@ -57,10 +57,18 @@ data class AppSettings(
     val lyricLineSpacing: Float = 1.35f,
     val lyricShowTranslation: Boolean = true,
     val lyricShowRoman: Boolean = false,
+    /**
+     * Size of the romanisation line relative to the original lyric line.
+     *
+     * Separate from [lyricTranslationScale] on purpose: romanisation is a reading aid for the line
+     * above it, so it usually wants to be smaller than the translation, and a Japanese listener may
+     * want a large translation with small romaji (or the other way round).
+     */
+    val lyricRomanScale: Float = 0.72f,
     val lyricBlur: Boolean = true,
     // Playback
     val playMode: PlayMode = PlayMode.SEQUENCE,
-    val neteaseQuality: String = "exhigh",
+    val neteaseQuality: String = "hires",
     val crossfadeMs: Int = 0,
     val autoPlayNext: Boolean = true,
     val skipOnError: Boolean = true,
@@ -75,6 +83,18 @@ data class AppSettings(
      * something that is allowed to be forgotten.
      */
     val recentlyPlayedIds: List<String> = emptyList(),
+    /**
+     * Tier requested when exporting a NetEase track to disk.
+     *
+     * `standard` answers with MP3; higher tiers may answer with FLAC, which is saved as FLAC rather
+     * than renamed. Kept apart from [neteaseQuality] because streaming and exporting are separate
+     * decisions: a phone can stream `exhigh` yet only want small files on disk.
+     */
+    val downloadLevel: String = "hires",
+    val downloadEmbedCover: Boolean = true,
+    val downloadWriteLyric: Boolean = true,
+    /** Desktop only: folder exported files land in; blank means the default `Music/HexNC`. */
+    val downloadDir: String = "",
     val neteaseCookiePersisted: Boolean = false,
     val onboardingDone: Boolean = false
 )
@@ -119,9 +139,10 @@ class SettingsStore(context: Context) {
         lyricLineSpacing = prefs.getFloat(KEY_LYRIC_SPACING, 1.35f),
         lyricShowTranslation = prefs.getBoolean(KEY_LYRIC_TRANS, true),
         lyricShowRoman = prefs.getBoolean(KEY_LYRIC_ROMAN, false),
+        lyricRomanScale = prefs.getFloat(KEY_LYRIC_ROMAN_SCALE, 0.72f),
         lyricBlur = prefs.getBoolean(KEY_LYRIC_BLUR, true),
         playMode = PlayMode.fromKey(prefs.getString(KEY_PLAY_MODE, null)),
-        neteaseQuality = prefs.getString(KEY_QUALITY, null) ?: "exhigh",
+        neteaseQuality = prefs.getString(KEY_QUALITY, null) ?: "hires",
         crossfadeMs = prefs.getInt(KEY_CROSSFADE, 0),
         autoPlayNext = prefs.getBoolean(KEY_AUTO_NEXT, true),
         skipOnError = prefs.getBoolean(KEY_SKIP_ERROR, true),
@@ -136,6 +157,10 @@ class SettingsStore(context: Context) {
             ?.filter { it.isNotBlank() }
             ?.take(RECENT_PLAYED_MAX)
             ?: emptyList(),
+        downloadLevel = prefs.getString(KEY_DOWNLOAD_LEVEL, null) ?: "hires",
+        downloadEmbedCover = prefs.getBoolean(KEY_DOWNLOAD_COVER, true),
+        downloadWriteLyric = prefs.getBoolean(KEY_DOWNLOAD_LYRIC, true),
+        downloadDir = prefs.getString(KEY_DOWNLOAD_DIR, null) ?: "",
         neteaseCookiePersisted = prefs.getBoolean(KEY_COOKIE_PERSISTED, false),
         onboardingDone = prefs.getBoolean(KEY_ONBOARDING, false)
     )
@@ -170,9 +195,20 @@ class SettingsStore(context: Context) {
 
     fun setLyricShowRoman(value: Boolean) = mutate { putBoolean(KEY_LYRIC_ROMAN, value) }
 
+    fun setLyricRomanScale(scale: Float) =
+        mutate { putFloat(KEY_LYRIC_ROMAN_SCALE, scale.coerceIn(0.5f, 1.0f)) }
+
     fun setLyricBlur(value: Boolean) = mutate { putBoolean(KEY_LYRIC_BLUR, value) }
 
     fun setPlayMode(value: PlayMode) = mutate { putString(KEY_PLAY_MODE, value.key) }
+
+    fun setDownloadLevel(level: String) = mutate { putString(KEY_DOWNLOAD_LEVEL, level) }
+
+    fun setDownloadEmbedCover(value: Boolean) = mutate { putBoolean(KEY_DOWNLOAD_COVER, value) }
+
+    fun setDownloadWriteLyric(value: Boolean) = mutate { putBoolean(KEY_DOWNLOAD_LYRIC, value) }
+
+    fun setDownloadDir(path: String) = mutate { putString(KEY_DOWNLOAD_DIR, path.trim()) }
 
     fun setNeteaseQuality(level: String) = mutate { putString(KEY_QUALITY, level) }
 
@@ -228,6 +264,7 @@ class SettingsStore(context: Context) {
         private const val KEY_LYRIC_SPACING = "lyric_line_spacing"
         private const val KEY_LYRIC_TRANS = "lyric_show_translation"
         private const val KEY_LYRIC_ROMAN = "lyric_show_roman"
+        private const val KEY_LYRIC_ROMAN_SCALE = "lyric_roman_scale"
         private const val KEY_LYRIC_BLUR = "lyric_blur"
         private const val KEY_PLAY_MODE = "play_mode"
         private const val KEY_QUALITY = "netease_quality"
@@ -237,6 +274,10 @@ class SettingsStore(context: Context) {
         private const val KEY_LAST_TAB = "last_tab"
         private const val KEY_RECENT_SEARCHES = "recent_searches"
         private const val KEY_RECENT_PLAYED = "recently_played"
+        private const val KEY_DOWNLOAD_LEVEL = "download_level"
+        private const val KEY_DOWNLOAD_COVER = "download_embed_cover"
+        private const val KEY_DOWNLOAD_LYRIC = "download_write_lyric"
+        private const val KEY_DOWNLOAD_DIR = "download_dir"
         private const val KEY_COOKIE_PERSISTED = "netease_cookie_persisted"
         private const val KEY_ONBOARDING = "onboarding_done"
     }

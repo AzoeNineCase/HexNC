@@ -47,15 +47,41 @@ data class NcAlbum(
 /**
  * The signed-in account's favourited albums (`/api/album/sublist`).
  *
+ * The album array is **not** under `albums`: both transports answer with the list in `data`, and the
+ * paging flag in a top-level `more`. Decoding `albums` therefore always produced an empty page — the
+ * page rendered "no favourited albums" for an account that had hundreds, and the sync pass wrote an
+ * empty cache. [albums] keeps its name because callers read it as the album list; only the wire name
+ * is aliased.
+ *
  * Only the paging flag and the album array are read: a page that carries an empty [albums] list is a
  * legitimate "nothing (more) favourited" rather than an error, so an empty result never throws.
  */
 @Serializable
 data class NcAlbumSublistResponse(
-    val albums: List<NcAlbum> = emptyList(),
+    @SerialName("data") val albums: List<NcAlbum> = emptyList(),
     val hasMore: Boolean = false,
+    /**
+     * Legacy alias for [hasMore] emitted by the encrypted gateway.
+     *
+     * The two transports disagree about the name of the paging flag, so both are parsed and
+     * [morePages] decides; trusting one of them means paging silently stops after the first page on
+     * whichever transport returns the other spelling.
+     */
+    val more: Boolean = false,
+    /**
+     * Total favourited albums on the account.
+     *
+     * Absent on the plain gateway and on some eapi replies, which is why paging cannot rely on it
+     * alone — but when it *is* present it is the only way to tell "one page because that is all
+     * there is" from "one page because the request was silently capped".
+     */
+    val total: Int? = null,
     val code: Int = 200,
-)
+    val msg: String? = null,
+) {
+    /** True when either transport says another page exists. */
+    val morePages: Boolean get() = hasMore || more
+}
 
 @Serializable
 data class NcUser(
@@ -368,6 +394,22 @@ data class NcArtistTopSongsResponse(
 data class NcArtistDetailResponse(
     val artist: NcArtist? = null,
     val hotSongs: List<NcSong> = emptyList(),
+    val more: Boolean = false,
+    val code: Int = 200,
+)
+
+/**
+ * The albums one artist has released (`/api/artist/albums/{id}`).
+ *
+ * The items sit under the album-specific `hotAlbums` key, not the usual `albums`, and the payload
+ * is otherwise richer than this app needs: it also carries the artist profile and `kindTabs`,
+ * which are ignored here. `total=true` is sent because it is what asks the service for [more];
+ * the album array alone would leave a caller unable to tell a finished discography from a
+ * truncated page.
+ */
+@Serializable
+data class NcArtistAlbumsResponse(
+    val hotAlbums: List<NcAlbum> = emptyList(),
     val more: Boolean = false,
     val code: Int = 200,
 )

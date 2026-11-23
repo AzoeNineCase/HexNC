@@ -1,16 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+    Themed-icon layer for the fused Hexcell Aurora mark: one solid colour, with the play
+    mark as an evenOdd hole so the launcher's tint shows through exactly like the colour
+    version does.
+-->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
     <path
-        android:pathData="M54,26 L78.25,40 L78.25,68 L54,82 L29.75,68 L29.75,40 Z"
-        android:strokeWidth="6.5"
-        android:strokeColor="#FFFFFFFF"
-        android:strokeLineJoin="round"
-        android:strokeLineCap="round" />
-    <path
-        android:pathData="M48.5,43.5 L48.5,64.5 L66.5,54 Z"
-        android:fillColor="#FFFFFFFF" />
+        android:fillType="evenOdd"
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M54,26 L78.25,40 L78.25,68 L54,82 L29.75,68 L29.75,40 Z M48.5,43.5 L48.5,64.5 L66.5,54 Z" />
 </vector>

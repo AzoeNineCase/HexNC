@@ -27,26 +27,59 @@ class HexNCDatabase(context: Context) :
         SCHEMA.forEach(db::execSQL)
     }
 
+    /**
+     * Additive migration only.
+     *
+     * The old body dropped and recreated every table, so any schema change silently threw away
+     * favourites, cover overrides and downloaded lyrics — and "clear the data and sign in again" is
+     * exactly the workaround this release is removing. New tables are created in place and existing
+     * rows are left alone. Anything genuinely un-migratable can still fall back to [rebuild].
+     */
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        // The library is rebuildable from the device + the network, so a destructive upgrade keeps
-        // migration code out of the project entirely.
+        if (oldVersion < V2) NC_ALBUM_SCHEMA.forEach(db::execSQL)
+    }
+
+    override fun onDowngrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        // An older build against a newer database has no forward-compatible reading path, so the
+        // library is rebuilt from scratch rather than left half-readable.
+        rebuild(db)
+    }
+
+    private fun rebuild(db: SQLiteDatabase) {
         DROP.forEach(db::execSQL)
         SCHEMA.forEach(db::execSQL)
     }
 
-    override fun onDowngrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        onUpgrade(db, oldVersion, newVersion)
-    }
-
     companion object {
         const val NAME = "hexnc.db"
-        const val VERSION = 1
+
+        /** 1: original library. 2: favourited-album cache ([T_NC_ALBUMS]). */
+        const val VERSION = 2
+        private const val V2 = 2
 
         const val T_SONGS = "songs"
         const val T_PLAYLISTS = "playlists"
         const val T_PLAYLIST_SONGS = "playlist_songs"
         const val T_LYRICS = "lyrics"
         const val T_META = "meta"
+        const val T_NC_ALBUMS = "nc_albums"
+
+        /** The favourited-album cache; kept apart so it can be added without touching v1 tables. */
+        private val NC_ALBUM_SCHEMA = listOf(
+            """
+            CREATE TABLE IF NOT EXISTS $T_NC_ALBUMS (
+                id INTEGER NOT NULL PRIMARY KEY,
+                name TEXT NOT NULL,
+                artist TEXT NOT NULL DEFAULT '',
+                cover_url TEXT,
+                track_count INTEGER NOT NULL DEFAULT 0,
+                publish_time INTEGER NOT NULL DEFAULT 0,
+                position INTEGER NOT NULL DEFAULT 0,
+                synced_at INTEGER NOT NULL DEFAULT 0
+            )
+            """.trimIndent(),
+            "CREATE INDEX IF NOT EXISTS idx_nc_albums_position ON $T_NC_ALBUMS(position ASC)",
+        )
 
         private val SCHEMA = listOf(
             """
@@ -135,11 +168,11 @@ class HexNCDatabase(context: Context) :
                 key TEXT NOT NULL PRIMARY KEY,
                 value TEXT
             )
-            """.trimIndent()
-        )
+            """.trimIndent(),
+        ) + NC_ALBUM_SCHEMA
 
         private val DROP = listOf(
-            T_META, T_LYRICS, T_PLAYLIST_SONGS, T_PLAYLISTS, T_SONGS
+            T_NC_ALBUMS, T_META, T_LYRICS, T_PLAYLIST_SONGS, T_PLAYLISTS, T_SONGS
         ).map { "DROP TABLE IF EXISTS $it" }
     }
 }

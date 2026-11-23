@@ -1,6 +1,11 @@
 package com.hexnc.music.ui.components
 
 import android.net.Uri
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -14,6 +19,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -24,10 +30,16 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.BlurredEdgeTreatment
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
@@ -42,9 +54,15 @@ import com.hexnc.music.HexNCApp
 import com.hexnc.music.data.model.Song
 import com.hexnc.music.data.model.SongSource
 import com.hexnc.music.di.AppContainer
+import com.hexnc.music.playback.DecodeCapability
 import com.hexnc.music.playback.PlayerSnapshot
 import com.hexnc.music.ui.theme.LocalAuroraTheme
 import com.hexnc.music.ui.theme.LocalIsDarkTheme
+import com.hexnc.music.ui.theme.Motion
+import com.hexnc.music.ui.theme.Radii
+import com.hexnc.music.ui.theme.RowMetrics
+import com.hexnc.music.ui.theme.Spacing
+import com.hexnc.music.ui.theme.TypeScale
 import com.hexnc.music.ui.theme.auroraBrush
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.Icon
@@ -185,14 +203,24 @@ fun SectionHeader(
     onAction: (() -> Unit)? = null,
 ) {
     Row(
-        modifier = modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 18.dp, bottom = 8.dp),
+        modifier = modifier.fillMaxWidth().padding(
+            start = RowMetrics.horizontalPadding + Spacing.xxs,
+            end = RowMetrics.horizontalPadding + Spacing.xxs,
+            top = Spacing.md + 2.dp,
+            bottom = Spacing.xs,
+        ),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
+            // A section label is a signpost, not a heading: smaller than a row title, tracked out a
+            // little so it reads as a label at a glance without competing with the content under it.
             text = title,
-            style = MiuixTheme.textStyles.subtitle,
-            fontWeight = FontWeight.SemiBold,
-            color = MiuixTheme.colorScheme.onBackground,
+            style = MiuixTheme.textStyles.footnote1.copy(
+                fontSize = TypeScale.sectionLabel,
+                letterSpacing = TypeScale.sectionLabelTracking,
+                fontWeight = FontWeight.SemiBold,
+            ),
+            color = MiuixTheme.colorScheme.onBackgroundVariant,
             modifier = Modifier.weight(1f),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -203,6 +231,91 @@ fun SectionHeader(
                 style = MiuixTheme.textStyles.footnote1,
                 color = MiuixTheme.colorScheme.primary,
                 modifier = Modifier.clickable(onClick = onAction).padding(4.dp),
+            )
+        }
+    }
+}
+
+/**
+ * The list look this app settles on: a flat row with a hairline underneath, inset so the divider
+ * starts where the title text does rather than at the window edge.
+ *
+ * Salt Player and the NetEase client both draw music lists this way — artwork plus two text lines is
+ * the only structure, and a filled card per track reads as a wall of boxes. A transparent surface also
+ * lets the aurora wash show through the list.
+ */
+private fun Modifier.listRowSeparator(inset: androidx.compose.ui.unit.Dp, color: Color): Modifier =
+    drawBehind {
+        val y = size.height - 0.5.dp.toPx()
+        drawLine(
+            color = color,
+            start = Offset(inset.toPx(), y),
+            end = Offset(size.width, y),
+            strokeWidth = 0.5.dp.toPx().coerceAtLeast(1f),
+        )
+    }
+
+/**
+ * One destination row: icon, name, optional count, chevron.
+ *
+ * Used by the library's browse index and by the playlists tab to reach a collection that lives on
+ * its own page. A plain row rather than a tile grid keeps both tabs readable in a narrow window.
+ */
+@Composable
+fun NavRow(
+    title: String,
+    subtitle: String? = null,
+    icon: androidx.compose.ui.graphics.vector.ImageVector? = null,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    Card(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp)
+            .listRowSeparator(
+                inset = if (icon != null) 52.dp else 16.dp,
+                color = MiuixTheme.colorScheme.outline.copy(alpha = 0.3f),
+            ),
+        cornerRadius = 10.dp,
+        insideMargin = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
+        colors = top.yukonga.miuix.kmp.basic.CardDefaults.defaultColors(color = Color.Transparent),
+        pressFeedbackType = top.yukonga.miuix.kmp.utils.PressFeedbackType.Sink,
+        onClick = onClick,
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (icon != null) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    modifier = Modifier.size(22.dp),
+                    tint = MiuixTheme.colorScheme.primary,
+                )
+                Spacer(Modifier.width(14.dp))
+            }
+            Text(
+                text = title,
+                modifier = Modifier.weight(1f),
+                style = MiuixTheme.textStyles.body1,
+                fontWeight = FontWeight.Medium,
+                color = MiuixTheme.colorScheme.onBackground,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (subtitle != null) {
+                Text(
+                    text = subtitle,
+                    style = MiuixTheme.textStyles.footnote2,
+                    color = MiuixTheme.colorScheme.onBackgroundVariant,
+                    maxLines = 1,
+                )
+            }
+            Spacer(Modifier.width(6.dp))
+            Icon(
+                imageVector = MiuixIcons.Basic.ArrowRight,
+                contentDescription = null,
+                modifier = Modifier.size(16.dp),
+                tint = MiuixTheme.colorScheme.onBackgroundVariant,
             )
         }
     }
@@ -261,13 +374,65 @@ fun EmptyState(
     }
 }
 
-/** Centred spinner for the first load of a screen. */
+/** Centred skeleton rows for the first load of a screen. */
 @Composable
 fun LoadingBox(modifier: Modifier = Modifier) {
-    Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        top.yukonga.miuix.kmp.basic.InfiniteProgressIndicator()
+    // A spinner says "something is happening"; placeholder rows say "a list is coming, and it will
+    // look like this". Layout does not jump when the data lands because the skeleton already reserves
+    // the same 64 dp rows and 48 dp artwork the real list uses.
+    val transition = rememberInfiniteTransition(label = "skeleton")
+    val phase by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(Motion.shimmerMs, easing = Motion.press),
+            repeatMode = RepeatMode.Restart,
+        ),
+        label = "skeleton-sweep",
+    )
+    val base = MiuixTheme.colorScheme.surfaceContainer
+    val highlight = MiuixTheme.colorScheme.surfaceContainerHigh
+    // The band sweeps in pixel space so one animation serves every row width without measuring.
+    val brush = Brush.horizontalGradient(
+        colors = listOf(base, highlight, base),
+        startX = phase * 2_400f - 800f,
+        endX = phase * 2_400f - 300f,
+    )
+    Column(modifier = modifier.fillMaxSize().padding(top = Spacing.xs)) {
+        repeat(SKELETON_ROWS) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = RowMetrics.rowHeight)
+                    .padding(horizontal = RowMetrics.horizontalPadding + Spacing.xs),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(Modifier.size(RowMetrics.cover).clip(RoundedCornerShape(Radii.row)).background(brush))
+                Spacer(Modifier.width(Spacing.sm))
+                Column(Modifier.weight(1f)) {
+                    Box(
+                        Modifier
+                            .fillMaxWidth(0.62f)
+                            .height(12.dp)
+                            .clip(RoundedCornerShape(Spacing.xxs))
+                            .background(brush),
+                    )
+                    Spacer(Modifier.height(Spacing.xs))
+                    Box(
+                        Modifier
+                            .fillMaxWidth(0.38f)
+                            .height(10.dp)
+                            .clip(RoundedCornerShape(Spacing.xxs))
+                            .background(brush),
+                    )
+                }
+            }
+        }
     }
 }
+
+/** Placeholder rows drawn while the first page of a list is loading. */
+private const val SKELETON_ROWS = 7
 
 // ------------------------------------------------------------------ rows
 
@@ -292,13 +457,32 @@ fun SongRow(
         if (song.album.isNotBlank()) append(" · ").append(song.album)
         if (song.source == SongSource.NETEASE) append(" · ").append(strings.neteaseMusic)
     }
+    // Warning the user before the tap is the whole point of the capability probe: a file whose
+    // container no platform decoder understands would otherwise fail only once ExoPlayer is handed
+    // it, which reads like a crash. Memoised per song, and extension-based for `content://` URIs.
+    val blocked = remember(song.id, song.localPath, song.mediaUri) {
+        if (song.source != SongSource.LOCAL) {
+            null
+        } else {
+            DecodeCapability.of(song.localPath?.takeIf { it.isNotBlank() } ?: song.mediaUri)
+                .takeIf { it.isBlocked }
+        }
+    }
     Card(
-        modifier = modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp),
-        cornerRadius = 16.dp,
-        insideMargin = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
-        colors = top.yukonga.miuix.kmp.basic.CardDefaults.defaultColors(
-            color = MiuixTheme.colorScheme.surfaceContainer,
-        ),
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = Spacing.xs)
+            // A fixed minimum height is what makes a hundred rows scan as a grid: the artwork plus
+            // two text lines already ask for ~56 dp, and the extra breathing room keeps a row from
+            // looking cramped next to the 48 dp cover.
+            .heightIn(min = RowMetrics.rowHeight)
+            .listRowSeparator(
+                inset = if (showCover) RowMetrics.dividerInset else Spacing.md,
+                color = MiuixTheme.colorScheme.outline.copy(alpha = 0.3f),
+            ),
+        cornerRadius = Radii.row,
+        insideMargin = PaddingValues(horizontal = Spacing.xs, vertical = Spacing.xs),
+        colors = top.yukonga.miuix.kmp.basic.CardDefaults.defaultColors(color = Color.Transparent),
         onClick = onClick,
         onLongPress = onLongClick,
         showIndication = true,
@@ -309,15 +493,15 @@ fun SongRow(
                 CoverArt(
                     coverUrl = song.coverUrl,
                     overridePath = song.coverOverridePath,
-                    size = 46.dp,
-                    corner = 12.dp,
+                    size = RowMetrics.cover,
+                    corner = Radii.row,
                 )
-                Spacer(Modifier.width(12.dp))
+                Spacer(Modifier.width(Spacing.sm))
             }
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = song.title,
-                    style = MiuixTheme.textStyles.body1,
+                    style = MiuixTheme.textStyles.body1.copy(fontSize = TypeScale.rowTitle),
                     fontWeight = FontWeight.Medium,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -330,6 +514,10 @@ fun SongRow(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
+            }
+            if (blocked != null) {
+                Spacer(Modifier.width(8.dp))
+                UnsupportedBadge(strings.unsupportedBadge)
             }
             if (song.favorite) {
                 Spacer(Modifier.width(8.dp))
@@ -390,19 +578,23 @@ fun CollectionRow(
     onLongClick: (() -> Unit)? = null,
 ) {
     Card(
-        modifier = modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp),
-        cornerRadius = 16.dp,
-        insideMargin = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
-        colors = top.yukonga.miuix.kmp.basic.CardDefaults.defaultColors(
-            color = MiuixTheme.colorScheme.surfaceContainer,
-        ),
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp)
+            .listRowSeparator(
+                inset = 64.dp,
+                color = MiuixTheme.colorScheme.outline.copy(alpha = 0.3f),
+            ),
+        cornerRadius = 10.dp,
+        insideMargin = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+        colors = top.yukonga.miuix.kmp.basic.CardDefaults.defaultColors(color = Color.Transparent),
         onClick = onClick,
         onLongPress = onLongClick,
         showIndication = true,
         pressFeedbackType = top.yukonga.miuix.kmp.utils.PressFeedbackType.Sink,
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            CoverArt(coverUrl = coverUrl, overridePath = overridePath, size = 52.dp, corner = 14.dp)
+            CoverArt(coverUrl = coverUrl, overridePath = overridePath, size = 48.dp, corner = 12.dp)
             Spacer(Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
@@ -461,24 +653,58 @@ fun MiniPlayerBar(
 ) {
     if (!snapshot.hasTrack || song == null) return
     Column(modifier = modifier.fillMaxWidth()) {
+        // A 3 dp progress rule read as a divider; 2 dp reads as transport state without shouting.
         LinearProgressIndicator(
             progress = snapshot.progress,
-            modifier = Modifier.fillMaxWidth().height(3.dp),
+            modifier = Modifier.fillMaxWidth().height(2.dp),
         )
-        Row(
+        Box(Modifier.fillMaxWidth()) {
+            // The strip borrows the cover as a tint rather than as an image: at 20% over the scrim it
+            // is recognisably this track without dragging the row's text below 4.5:1 contrast.
+            val model: Any? = remember(song.coverUrl, song.coverOverridePath) {
+                when {
+                    !song.coverOverridePath.isNullOrBlank() ->
+                        File(song.coverOverridePath).takeIf { it.exists() }?.let(Uri::fromFile)
+                    !song.coverUrl.isNullOrBlank() -> song.coverUrl
+                    else -> null
+                }
+            }
+            if (model != null) {
+                AsyncImage(
+                    model = model,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .matchParentSize()
+                        .blur(40.dp, edgeTreatment = BlurredEdgeTreatment.Unbounded)
+                        .alpha(0.20f),
+                )
+                Box(
+                    Modifier
+                        .matchParentSize()
+                        .background(MiuixTheme.colorScheme.background.copy(alpha = 0.72f)),
+                )
+                Box(
+                    Modifier
+                        .matchParentSize()
+                        .background(MiuixTheme.colorScheme.onBackground.copy(alpha = 0.12f)),
+                )
+            }
+            Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .heightIn(min = RowMetrics.rowHeight)
                 .clickable(onClick = onOpen)
-                .padding(horizontal = 16.dp, vertical = 10.dp),
+                .padding(horizontal = RowMetrics.horizontalPadding, vertical = Spacing.xs),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             CoverArt(
                 coverUrl = song.coverUrl,
                 overridePath = song.coverOverridePath,
-                size = 46.dp,
-                corner = 12.dp,
+                size = RowMetrics.cover,
+                corner = Radii.row,
             )
-            Spacer(Modifier.width(12.dp))
+            Spacer(Modifier.width(Spacing.sm))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = song.title,
@@ -518,6 +744,7 @@ fun MiniPlayerBar(
                     modifier = Modifier.size(24.dp),
                     tint = MiuixTheme.colorScheme.onBackground,
                 )
+            }
             }
         }
     }
@@ -576,6 +803,24 @@ fun Caption(text: String, modifier: Modifier = Modifier, color: Color? = null) {
     )
 }
 
+/**
+ * Elapsed / total time under the seek bar.
+ *
+ * Tabular figures (`tnum`) matter here more than anywhere else in the app: proportional digits make
+ * the whole line shift a pixel sideways every second as the playhead counts up.
+ */
+@Composable
+fun TimeCaption(text: String, modifier: Modifier = Modifier) {
+    Text(
+        text = text,
+        modifier = modifier,
+        style = MiuixTheme.textStyles.footnote2.copy(fontFeatureSettings = "tnum"),
+        color = MiuixTheme.colorScheme.onBackgroundVariant,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+    )
+}
+
 /** Convenience for the "12 songs · 48 min" line that appears on several screens. */
 @Composable
 fun CountLine(count: Int, durationMs: Long, strings: com.hexnc.music.ui.i18n.Strings, modifier: Modifier = Modifier) {
@@ -590,4 +835,26 @@ fun CountLine(count: Int, durationMs: Long, strings: com.hexnc.music.ui.i18n.Str
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
     )
+}
+
+/**
+ * A small pill that marks a track whose container no bundled decoder understands.
+ *
+ * It sits in the row rather than in a dialog because the user needs to know *before* tapping: the
+ * formats in question (WMA, APE, DST-compressed DSD) never become playable by retrying.
+ */
+@Composable
+private fun UnsupportedBadge(label: String) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(5.dp))
+            .background(MiuixTheme.colorScheme.surfaceContainerHigh)
+            .padding(horizontal = 6.dp, vertical = 1.dp),
+    ) {
+        Text(
+            text = label,
+            style = MiuixTheme.textStyles.footnote2,
+            color = MiuixTheme.colorScheme.onBackgroundVariant,
+        )
+    }
 }

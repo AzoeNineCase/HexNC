@@ -175,10 +175,15 @@ class PlaybackController(
      * [dsdSkipped] is carried alongside the items because "the queue is shorter than what you tapped"
      * is a question the user will ask, and the only place that knows the answer is the resolver.
      */
-    private data class PlayableQueue(val items: List<Song>, val dsdSkipped: Int)
+    private data class PlayableQueue(
+        val items: List<Song>,
+        val dsdSkipped: Int,
+        val blockedFormat: DecodeSupport? = null,
+    )
 
     private fun playable(songs: List<Song>, resolved: Map<Long, String>): PlayableQueue {
         var dsdSkipped = 0
+        var blockedFormat: DecodeSupport? = null
         val items = songs.filter { song ->
             when (song.source) {
                 SongSource.LOCAL -> {
@@ -195,14 +200,28 @@ class PlaybackController(
                             true
                         }
                     } else {
-                        localFileOf(song) != null
+                        val file = localFileOf(song)
+                        if (file == null) {
+                            false
+                        } else {
+                            // Formats no bundled decoder can read (Opus, WMA, DST) are refused before
+                            // the device is asked to open anything: the queue then still plays, and
+                            // the user is told the format is the problem rather than the file.
+                            val support = DecodeCapability.of(file)
+                            if (support.isBlocked) {
+                                if (blockedFormat == null) blockedFormat = support
+                                false
+                            } else {
+                                true
+                            }
+                        }
                     }
                 }
 
                 SongSource.NETEASE -> song.neteaseId?.let { id -> resolved[id] } != null
             }
         }
-        return PlayableQueue(items, dsdSkipped)
+        return PlayableQueue(items, dsdSkipped, blockedFormat)
     }
 
     private fun localFileOf(song: Song): File? {
@@ -261,11 +280,21 @@ class PlaybackController(
         val fresh = urlsFor(songs)
         val resolved = playable(songs, fresh)
         if (resolved.items.isEmpty()) {
-            postMessage(if (resolved.dsdSkipped > 0) MESSAGE_PLAYBACK_DSD else MESSAGE_NO_PLAYABLE)
+            postMessage(
+                when {
+                    resolved.blockedFormat != null -> MESSAGE_PLAYBACK_UNSUPPORTED_FORMAT
+                    resolved.dsdSkipped > 0 -> MESSAGE_PLAYBACK_DSD
+                    else -> MESSAGE_NO_PLAYABLE
+                },
+            )
             return
         }
         urls = fresh
-        if (resolved.dsdSkipped > 0) postMessage(MESSAGE_PLAYBACK_DSD)
+        if (resolved.blockedFormat != null) {
+            postMessage(MESSAGE_PLAYBACK_UNSUPPORTED_FORMAT)
+        } else if (resolved.dsdSkipped > 0) {
+            postMessage(MESSAGE_PLAYBACK_DSD)
+        }
         // Map the requested start position onto the filtered list: count how many of the songs
         // before it were dropped so the user still lands on the track they tapped.
         val target = songs.getOrNull(startIndex.coerceIn(0, songs.lastIndex))
@@ -282,7 +311,11 @@ class PlaybackController(
         if (candidates.isEmpty()) return 0
         val merged = urls + urlsFor(candidates)
         val resolved = playable(candidates, merged)
-        if (resolved.dsdSkipped > 0) postMessage(MESSAGE_PLAYBACK_DSD)
+        if (resolved.blockedFormat != null) {
+            postMessage(MESSAGE_PLAYBACK_UNSUPPORTED_FORMAT)
+        } else if (resolved.dsdSkipped > 0) {
+            postMessage(MESSAGE_PLAYBACK_DSD)
+        }
         if (resolved.items.isEmpty()) return 0
         urls = merged
         val previousSize = queue.size

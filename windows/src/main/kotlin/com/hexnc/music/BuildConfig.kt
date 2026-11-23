@@ -8,7 +8,7 @@ package com.hexnc.music
  * `build.gradle.kts` and the Android `app/build.gradle.kts`.
  */
 object BuildConfig {
-    const val VERSION_NAME = "1.1.0"
-    const val VERSION_CODE = 2
+    const val VERSION_NAME = "1.2.0"
+    const val VERSION_CODE = 4
     const val DEBUG = false
 }

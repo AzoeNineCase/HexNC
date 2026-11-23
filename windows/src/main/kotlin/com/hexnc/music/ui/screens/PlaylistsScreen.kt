@@ -14,6 +14,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -25,7 +26,6 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hexnc.music.data.model.Playlist
 import com.hexnc.music.data.model.PlaylistSource
-import com.hexnc.music.data.netease.NcAlbum
 import com.hexnc.music.di.AppContainer
 import com.hexnc.music.ui.HexScaffold
 import com.hexnc.music.ui.Route
@@ -33,10 +33,14 @@ import com.hexnc.music.ui.components.CollectionRow
 import com.hexnc.music.ui.components.EmptyState
 import com.hexnc.music.ui.components.HexList
 import com.hexnc.music.ui.components.LoadingBox
+import com.hexnc.music.ui.components.NavRow
 import com.hexnc.music.ui.components.SectionHeader
 import com.hexnc.music.ui.i18n.LocalStrings
 import com.hexnc.music.ui.i18n.Strings
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.IconButton
 import top.yukonga.miuix.kmp.basic.LinearProgressIndicator
@@ -47,6 +51,7 @@ import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.basic.TopAppBar
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Add
+import top.yukonga.miuix.kmp.icon.extended.Album
 import top.yukonga.miuix.kmp.icon.extended.Refresh
 import top.yukonga.miuix.kmp.overlay.OverlayDialog
 import top.yukonga.miuix.kmp.theme.MiuixTheme
@@ -77,8 +82,7 @@ fun PlaylistsScreen(
     var newName by remember { mutableStateOf("") }
     var syncing by remember { mutableStateOf(false) }
     var syncLine by remember { mutableStateOf("") }
-    var favAlbums by remember { mutableStateOf<List<NcAlbum>>(emptyList()) }
-    var importingAlbum by remember { mutableStateOf(false) }
+    var favAlbumCount by remember { mutableIntStateOf(0) }
 
     suspend fun reload() {
         local = container.library.playlistsOf(PlaylistSource.LOCAL)
@@ -88,15 +92,13 @@ fun PlaylistsScreen(
 
     LaunchedEffect(revision) { reload() }
 
-    // Album favourites are a service read, so they are deliberately kept outside [reload]: the tab
-    // shows the playlists it already has instead of holding the screen on a round trip. A failed read
-    // keeps the previous list rather than blanking the section — the service answering badly for a
-    // moment is not a reason to make the user's albums disappear.
+    // The tab has to answer "how fresh is this?" without the user opening a page: the sync line is
+    // seeded from the cached timestamp and replaced by the result summary after a manual sync.
     LaunchedEffect(session.isSignedIn, revision) {
-        favAlbums = if (session.isSignedIn) {
-            container.netease.favouriteAlbums().getOrElse { favAlbums }
-        } else {
-            emptyList()
+        favAlbumCount = if (session.isSignedIn) container.netease.cachedFavouriteAlbums().size else 0
+        if (syncLine.isEmpty()) {
+            val at = container.netease.albumsSyncedAt()
+            syncLine = if (at <= 0L) strings.neverSynced else strings.lastSyncedAt(formatSyncTime(at))
         }
     }
 
@@ -113,29 +115,15 @@ fun PlaylistsScreen(
             }
             syncing = false
             result
-                .onSuccess { report -> message("${strings.syncDone} · ${strings.songs(report.tracks)}") }
-                .onFailure { message(strings.syncFailed) }
+                .onSuccess { report ->
+                    syncLine = strings.syncSummary(report.albums, report.skipped, report.failures.size)
+                    message("${strings.syncDone} · ${strings.songs(report.tracks)}")
+                }
+                .onFailure {
+                    syncLine = strings.syncFailed
+                    message(strings.syncFailed)
+                }
             container.library.notifyExternalChange()
-        }
-    }
-
-    /**
-     * Opens a favourited album: materialise its tracks, then show it as an ordinary local album.
-     *
-     * The album page is a local-library screen, so importing first is what makes it playable; an
-     * album the service will not hand over is reported rather than opening a page whose rows fail.
-     */
-    fun openAlbum(album: NcAlbum) {
-        if (importingAlbum) return
-        scope.launch {
-            importingAlbum = true
-            val count = container.netease.importAlbum(album.id).getOrDefault(0)
-            importingAlbum = false
-            if (count > 0) {
-                onNavigate(Route.AlbumDetail(album.name, album.artistName))
-            } else {
-                message(strings.networkError)
-            }
         }
     }
 
@@ -172,7 +160,9 @@ fun PlaylistsScreen(
         Box(modifier = Modifier.fillMaxWidth().padding(top = padding.calculateTopPadding())) {
             when {
                 !loaded -> LoadingBox()
-                local.isEmpty() && remote.isEmpty() && favAlbums.isEmpty() -> EmptyState(
+                // A signed-in account always gets the list, even when it is empty: the favourited
+                // albums entry lives at the bottom of it and must stay reachable.
+                local.isEmpty() && remote.isEmpty() && !session.isSignedIn -> EmptyState(
                     title = strings.playlistEmpty,
                     body = strings.emptyPlaylistHint,
                     actionLabel = strings.createPlaylist,
@@ -240,26 +230,19 @@ fun PlaylistsScreen(
                         }
                     }
 
-                    if (favAlbums.isNotEmpty()) {
-                        item(key = "nc-album-header") { SectionHeader(strings.neteaseAlbums) }
-                        items(favAlbums, key = { "nc-album-" + it.id }) { album ->
-                            CollectionRow(
-                                title = album.name,
-                                subtitle = album.artistName.ifBlank { null },
-                                coverUrl = album.picUrl,
-                                overridePath = null,
-                                strings = strings,
-                                count = album.size,
-                                onClick = { openAlbum(album) },
-                            )
-                        }
-                    } else if (session.isSignedIn) {
-                        item(key = "nc-album-empty") {
-                            EmptyState(
-                                title = strings.neteaseAlbums,
-                                body = strings.neteaseAlbumsEmpty,
-                            )
-                        }
+                    // Favourited albums get their own page instead of a third inline shelf: inline
+                    // they sat below the fold, and a failed read made the section vanish entirely.
+                    item(key = "nc-album-entry") {
+                        NavRow(
+                            title = strings.neteaseAlbums,
+                            subtitle = if (favAlbumCount == 0) {
+                                strings.neverSynced
+                            } else {
+                                strings.albums(favAlbumCount)
+                            },
+                            icon = MiuixIcons.Album,
+                            onClick = { onNavigate(Route.NeteaseAlbums) },
+                        )
                     }
                 }
             }
@@ -330,3 +313,7 @@ private fun PlaylistRow(playlist: Playlist, strings: Strings, onClick: () -> Uni
         }
     }
 }
+
+/** Short local time for the sync line: long enough to judge staleness, short enough for a subtitle. */
+private fun formatSyncTime(ms: Long): String =
+    SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(ms))

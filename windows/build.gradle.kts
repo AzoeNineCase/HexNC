@@ -11,7 +11,7 @@ plugins {
 }
 
 group = "com.hexnc.music"
-version = "1.1.0"
+version = "1.2.0"
 
 repositories {
     mavenCentral()
@@ -64,6 +64,16 @@ dependencies {
     // FLAC is not covered by soundlibs; jflac ships its own Java Sound SPI.
     implementation("org.jflac:jflac-codec:1.5.2")
 
+    // Containers the scanner accepts but Java Sound cannot read on its own: MP4/M4A (AAC, ALAC)
+    // and Monkey's Audio. All four are Java Sound SPI providers, so `AudioSystem` picks them up
+    // with no engine change. javasound-core is the demuxer layer they share and is GPLv2 *with the
+    // Classpath Exception* — linking a proprietary/compatible program against it is explicitly
+    // permitted; the three codec providers are Apache-2.0, BSD-3-Clause and LGPL-2.0 respectively.
+    implementation("com.tianscar.javasound:javasound-core:1.0.0")
+    implementation("com.tianscar.javasound:javasound-aac:0.9.8")
+    implementation("com.tianscar.javasound:javasound-alac:0.2.3")
+    implementation("com.tianscar.javasound:javasound-ape:1.7.7")
+
     testImplementation("junit:junit:4.13.2")
 }
 
@@ -90,7 +100,7 @@ compose.desktop {
         nativeDistributions {
             targetFormats(TargetFormat.Msi, TargetFormat.Exe)
             packageName = "HexNC"
-            packageVersion = "1.1.0"
+            packageVersion = "1.2.0"
             description = "HexNC — NetEase Cloud Music desktop client"
             vendor = "HexNC"
             copyright = "© HexNC"
@@ -115,6 +125,12 @@ compose.desktop {
                 dirChooser = true
                 perUserInstall = true
                 upgradeUuid = "0b7d9d1e-6b1b-4d3f-9a4e-2f5c8a1d77aa"
+
+                // jpackage compiles the .ico into the launcher exe, which is what Explorer, the
+                // taskbar and Alt-Tab read before the app runs; without it the packaged app wore
+                // the generic Java coffee-cup icon. The live window reads the same artwork from
+                // src/main/resources/hexnc.png (see Main.appIcon), so both stay identical.
+                iconFile.set(layout.projectDirectory.file("packaging/windows/hexnc.ico").asFile)
             }
         }
     }

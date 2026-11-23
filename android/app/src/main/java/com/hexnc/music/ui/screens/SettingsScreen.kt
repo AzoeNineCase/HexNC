@@ -48,6 +48,7 @@ import top.yukonga.miuix.kmp.icon.extended.Back
 import top.yukonga.miuix.kmp.icon.extended.Background
 import top.yukonga.miuix.kmp.icon.extended.Contacts
 import top.yukonga.miuix.kmp.icon.extended.Delete
+import top.yukonga.miuix.kmp.icon.extended.FileDownloads
 import top.yukonga.miuix.kmp.icon.extended.Folder
 import top.yukonga.miuix.kmp.icon.extended.Info
 import top.yukonga.miuix.kmp.icon.extended.Music
@@ -298,6 +299,43 @@ fun SettingsScreen(
                 )
             }
 
+            // ---------------------------------------------------------------- downloads
+            item(key = "downloadsHeader") { SectionHeader(strings.downloadSection) }
+            item(key = "downloadLevel") {
+                ChoiceRow(
+                    title = strings.audioQuality,
+                    value = qualityLabel(settings.downloadLevel, strings),
+                    summary = strings.downloadLevelHint,
+                    icon = MiuixIcons.FileDownloads,
+                    onClick = {
+                        choice = Choice(
+                            title = strings.audioQuality,
+                            options = QUALITY_LEVELS.map { qualityLabel(it, strings) },
+                            selected = QUALITY_LEVELS.indexOf(settings.downloadLevel).coerceAtLeast(0),
+                            onPick = { index ->
+                                container.settings.setDownloadLevel(QUALITY_LEVELS[index])
+                            },
+                        )
+                    },
+                )
+            }
+            item(key = "downloadCover") {
+                SwitchRow(
+                    title = strings.downloadEmbedCover,
+                    summary = strings.downloadEmbedCoverHint,
+                    checked = settings.downloadEmbedCover,
+                    onCheckedChange = { container.settings.setDownloadEmbedCover(it) },
+                )
+            }
+            item(key = "downloadLyric") {
+                SwitchRow(
+                    title = strings.downloadWriteLyric,
+                    summary = strings.downloadWriteLyricHint,
+                    checked = settings.downloadWriteLyric,
+                    onCheckedChange = { container.settings.setDownloadWriteLyric(it) },
+                )
+            }
+
             // ---------------------------------------------------------------- lyrics
             item(key = "lyricsHeader") { SectionHeader(strings.lyrics) }
             item(key = "lyricSize") {
@@ -334,6 +372,24 @@ fun SettingsScreen(
                     onCheckedChange = { container.settings.setLyricShowRoman(it) },
                 )
             }
+            // Only meaningful with the switch on, so it is hidden rather than shown disabled: a
+            // slider that changes nothing is the exact complaint this module started from.
+            if (settings.lyricShowRoman) {
+                item(key = "lyricRomanScale") {
+                    SliderRow(
+                        title = strings.lyricRomanScale,
+                        valueText = String.format(
+                            java.util.Locale.ROOT,
+                            "%.2f×",
+                            settings.lyricRomanScale,
+                        ),
+                        value = settings.lyricRomanScale,
+                        range = 0.5f..1.0f,
+                        steps = 9,
+                        onValueChange = { container.settings.setLyricRomanScale(it) },
+                    )
+                }
+            }
             item(key = "lyricPreview") {
                 Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp)) {
                     Text(
@@ -346,6 +402,14 @@ fun SettingsScreen(
                         Text(
                             text = strings.lyricPreviewTrans,
                             style = MiuixTheme.textStyles.footnote1,
+                            color = MiuixTheme.colorScheme.onBackgroundVariant,
+                        )
+                    }
+                    if (settings.lyricShowRoman) {
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            text = strings.lyricPreviewRoman,
+                            style = MiuixTheme.textStyles.footnote2,
                             color = MiuixTheme.colorScheme.onBackgroundVariant,
                         )
                     }

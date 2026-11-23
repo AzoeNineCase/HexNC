@@ -104,6 +104,21 @@ data class LyricLine(
     val words: List<LyricWord> = emptyList()
 )
 
+/**
+ * True when the line is written in Japanese kana.
+ *
+ * Used to decide whether a missing romanisation is worth calling out. Hiragana and katakana only
+ * appear in Japanese text, so a Chinese line with no `romalrc` stays silent instead of every line
+ * collecting a "no romaji" note — while a Japanese line whose service entry has no `romalrc` says so
+ * once, which is what tells the user the sheet is incomplete rather than the display being broken.
+ */
+val LyricLine.isJapaneseScript: Boolean
+    get() = text.any { ch ->
+        ch in '\u3040'..'\u309f' || // hiragana
+            ch in '\u30a0'..'\u30ff' || // katakana
+            ch in '\u31f0'..'\u31ff' // katakana phonetic extensions
+    }
+
 /** Word-level timing used by NetEase `yrc` (karaoke) lyrics. */
 data class LyricWord(
     val startMs: Long,

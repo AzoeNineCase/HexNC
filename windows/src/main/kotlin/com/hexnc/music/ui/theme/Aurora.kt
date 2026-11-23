@@ -19,8 +19,8 @@ import top.yukonga.miuix.kmp.theme.lightColorScheme
  * Every entry is a three-stop aurora: a deep [accent] that carries the interactive surfaces, a
  * [glow] that acts as the second gradient stop / secondary role, and a [blush] that closes the
  * gradient. The light and dark schemes are *derived* from those three colours by
- * [lightColors] / [darkColors] rather than hand-written, which keeps the six themes provably
- * consistent with each other and makes adding a seventh a one-line change.
+ * [lightColors] / [darkColors] rather than hand-written, which keeps the nine themes provably
+ * consistent with each other and makes adding another one a one-line change.
  */
 enum class AuroraTheme(
     val key: String,
@@ -30,13 +30,44 @@ enum class AuroraTheme(
     val accentDeep: Long,
     val glow: Long,
     val blush: Long,
+    /**
+     * Whether this palette ignores the user's light/dark choice and always renders dark.
+     *
+     * A pure black-and-white palette has no light restatement that is still black-and-white: on a
+     * white background the stops would have to become grey-on-grey noise, so the mode switch is
+     * deliberately overruled instead of honoured badly.
+     */
+    val alwaysDark: Boolean = false,
+    /**
+     * Whether this palette wants a glass/blur treatment on its surfaces.
+     *
+     * Nothing reads it yet beyond [LocalGlassyTheme]; it exists now so that the later glass pass can
+     * key off the palette itself instead of hard-coding "frost" at every call site.
+     */
+    val glassy: Boolean = false,
 ) {
     AURORA("aurora", "极光", "Aurora", 0xFF6D5DFC, 0xFF4536C9, 0xFF2FD8D8, 0xFFFF6FB5),
     BOREALIS("borealis", "北境", "Borealis", 0xFF10B981, 0xFF0A7D5A, 0xFF38D6FF, 0xFF9BE870),
     POLAR("polar", "极夜", "Polar", 0xFF3B82F6, 0xFF1D4ED8, 0xFF22D3EE, 0xFF818CF8),
     FLAMINGO("flamingo", "霞光", "Flamingo", 0xFFF0508E, 0xFFC42A68, 0xFFFF9E6D, 0xFFC084FC),
     NEBULA("nebula", "星云", "Nebula", 0xFF8B5CF6, 0xFF6D28D9, 0xFFEC4899, 0xFF22D3EE),
-    ABYSS("abyss", "深海", "Abyss", 0xFF0F9B8E, 0xFF0A6F66, 0xFF06B6D4, 0xFF34D399);
+    ABYSS("abyss", "深海", "Abyss", 0xFF0F9B8E, 0xFF0A6F66, 0xFF06B6D4, 0xFF34D399),
+
+    // Impressionist pastels: lavender carries the interaction, sage is the second gradient stop and
+    // dusty rose closes it. Deliberately the calmest chromatic family apart from MONO - the accent
+    // sits at ~0.30 saturation raw so [soften] has room to bring it down without going muddy.
+    MONET("monet", "莫奈", "Monet", 0xFF8A7EB4, 0xFF63588B, 0xFF9DBFAE, 0xFFD8B4BC),
+
+    // Cool glass: the blue-grey of light through a frosted pane. A step darker than the reference
+    // swatch (0xFF8CA2BC) on purpose - the accent still has to carry text on white at >= 3:1, and
+    // anything lighter than ~0xFF7A92AE cannot reach that floor.
+    FROST("frost", "毛玻璃", "Frosted glass", 0xFF7189A6, 0xFF4E617C, 0xFFBFD8E8, 0xFFDCE4EC, glassy = true),
+
+    // Pure black and white, rendered as a neutral ladder. The stops keep a whisper of blue (at most
+    // 12/255 of chroma) because a literally hue-free grey has no saturation left for [soften] to
+    // remove, and the contrast rules pin the accent to a mid grey: it must clear 3:1 on white, so it
+    // cannot be one of the near-white greys that the glow/blush stops use.
+    MONO("mono", "暗色纯黑白", "Mono dark", 0xFF7F838B, 0xFF565A62, 0xFFC7CBD1, 0xFFDDE0E5, alwaysDark = true);
 
     /** Localised display name; [useChinese] comes from the active [com.hexnc.music.ui.i18n.Strings]. */
     fun label(useChinese: Boolean): String = if (useChinese) labelZh else labelEn
@@ -260,6 +291,15 @@ val LocalAuroraTheme = staticCompositionLocalOf { AuroraTheme.DEFAULT }
 /** Whether the effective scheme is dark, for the places that need to branch on it directly. */
 val LocalIsDarkTheme = staticCompositionLocalOf { true }
 
+/**
+ * Whether the active palette asked for glassy surfaces (see [AuroraTheme.glassy]).
+ *
+ * Read through a composition local rather than through the palette at each call site so that the
+ * eventual glass pass can be swapped in per-platform: a blur that is cheap on desktop is not on a
+ * low-end phone, and every consumer would otherwise have to know which palette it is looking at.
+ */
+val LocalGlassyTheme = staticCompositionLocalOf { false }
+
 /** Resolve the effective dark/light decision for a stored [ThemeMode]. */
 @Composable
 fun isDarkTheme(mode: ThemeMode): Boolean = when (mode) {
@@ -275,6 +315,11 @@ fun isDarkTheme(mode: ThemeMode): Boolean = when (mode) {
  * `colors` overload also installs `LocalContentColor`, so Miuix's own `Text` default
  * (`color = Color.Unspecified` → `LocalContentColor`) resolves correctly. With the `controller`
  * overload the content colour is left untouched and dark-mode text renders black on black.
+ *
+ * Two overrides are applied on top of the stored [themeMode]: a palette with
+ * [AuroraTheme.alwaysDark] forces the dark scheme *and* the AMOLED base. The base override matters
+ * because the mono palette is grey-on-grey by definition — on the ordinary dark navy surface it
+ * reads as a slightly dirty blue, and only true black keeps it neutral.
  */
 @Composable
 fun HexNCTheme(
@@ -283,13 +328,15 @@ fun HexNCTheme(
     amoledBlack: Boolean,
     content: @Composable () -> Unit,
 ) {
-    val dark = isDarkTheme(themeMode)
-    val colors = remember(aurora, dark, amoledBlack) {
-        if (dark) darkColors(aurora, amoledBlack) else lightColors(aurora)
+    val dark = aurora.alwaysDark || isDarkTheme(themeMode)
+    val amoled = amoledBlack || aurora.alwaysDark
+    val colors = remember(aurora, dark, amoled) {
+        if (dark) darkColors(aurora, amoled) else lightColors(aurora)
     }
     CompositionLocalProvider(
         LocalAuroraTheme provides aurora,
         LocalIsDarkTheme provides dark,
+        LocalGlassyTheme provides aurora.glassy,
     ) {
         MiuixTheme(colors = colors, content = content)
     }

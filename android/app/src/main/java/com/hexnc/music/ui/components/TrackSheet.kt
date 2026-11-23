@@ -26,6 +26,7 @@ import top.yukonga.miuix.kmp.icon.extended.Delete
 import top.yukonga.miuix.kmp.icon.extended.Edit
 import top.yukonga.miuix.kmp.icon.extended.Favorites
 import top.yukonga.miuix.kmp.icon.extended.FavoritesFill
+import top.yukonga.miuix.kmp.icon.extended.FileDownloads
 import top.yukonga.miuix.kmp.icon.extended.Import
 import top.yukonga.miuix.kmp.icon.extended.Notes
 import top.yukonga.miuix.kmp.icon.extended.Play
@@ -89,6 +90,24 @@ fun TrackActionsSheet(
                 startAction = { SheetIcon(MiuixIcons.Add) },
                 onClick = onOpenAddToPlaylist,
             )
+            // Download sits next to the playlist action because both are "put this track somewhere
+            // else"; only NetEase rows have a remote source, so local files hide it entirely.
+            if (song.source == com.hexnc.music.data.model.SongSource.NETEASE &&
+                (song.neteaseId ?: 0L) > 0L
+            ) {
+                BasicComponent(
+                    title = strings.download,
+                    summary = strings.downloadSummaryHint,
+                    startAction = { SheetIcon(MiuixIcons.FileDownloads) },
+                    onClick = {
+                        container.downloads.enqueue(
+                            listOf(song),
+                            downloadConfig(container, strings),
+                        )
+                        onDismiss()
+                    },
+                )
+            }
             BasicComponent(
                 title = strings.changeCover,
                 startAction = { SheetIcon(MiuixIcons.Edit) },

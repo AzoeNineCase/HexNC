@@ -1,6 +1,7 @@
 package com.hexnc.music.ui.screens
 
 import android.net.Uri
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -11,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.items
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -26,7 +28,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hexnc.music.data.db.AlbumGroup
-import com.hexnc.music.data.db.ArtistGroup
 import com.hexnc.music.data.local.ScannedFolder
 import com.hexnc.music.data.model.Playlist
 import com.hexnc.music.data.model.Song
@@ -34,14 +35,17 @@ import com.hexnc.music.data.repo.CoverScope
 import com.hexnc.music.data.repo.LibraryStats
 import com.hexnc.music.di.AppContainer
 import com.hexnc.music.ui.HexScaffold
+import com.hexnc.music.ui.LibrarySection
 import com.hexnc.music.ui.Route
 import com.hexnc.music.ui.components.CollectionRow
 import com.hexnc.music.ui.components.EmptyState
 import com.hexnc.music.ui.components.HexList
 import com.hexnc.music.ui.components.LoadingBox
+import com.hexnc.music.ui.components.NavRow
 import com.hexnc.music.ui.components.SectionHeader
 import com.hexnc.music.ui.components.SongRow
 import com.hexnc.music.ui.components.TrackActionsSheet
+import com.hexnc.music.ui.components.rememberLyricImporter
 import com.hexnc.music.ui.i18n.LocalStrings
 import com.hexnc.music.ui.i18n.Strings
 import com.hexnc.music.ui.platform.DesktopDialogs
@@ -58,12 +62,14 @@ import top.yukonga.miuix.kmp.basic.SnackbarHostState
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TopAppBar
 import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.basic.ArrowRight
 import top.yukonga.miuix.kmp.icon.extended.Album
-import top.yukonga.miuix.kmp.icon.extended.CloudFill
 import top.yukonga.miuix.kmp.icon.extended.Favorites
 import top.yukonga.miuix.kmp.icon.extended.Folder
 import top.yukonga.miuix.kmp.icon.extended.Import
 import top.yukonga.miuix.kmp.icon.extended.Music
+import top.yukonga.miuix.kmp.icon.extended.Playlist
+import top.yukonga.miuix.kmp.icon.extended.Recent
 import top.yukonga.miuix.kmp.overlay.OverlayBottomSheet
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.utils.PressFeedbackType
@@ -105,8 +111,8 @@ fun LibraryScreen(
     var stats by remember { mutableStateOf<LibraryStats?>(null) }
     var songs by remember { mutableStateOf<List<Song>>(emptyList()) }
     var recentlyPlayed by remember { mutableStateOf<List<Song>>(emptyList()) }
+    var recentlyAdded by remember { mutableStateOf<List<Song>>(emptyList()) }
     var albums by remember { mutableStateOf<List<AlbumGroup>>(emptyList()) }
-    var artists by remember { mutableStateOf<List<ArtistGroup>>(emptyList()) }
     var playlists by remember { mutableStateOf<List<Playlist>>(emptyList()) }
     var loaded by remember { mutableStateOf(false) }
     var importing by remember { mutableStateOf(false) }
@@ -121,8 +127,10 @@ fun LibraryScreen(
         // The history is a list of ids this device remembers; deleted or unimported ids simply drop
         // out of the lookup, so the shelf never shows a row that cannot be played.
         recentlyPlayed = container.library.recentlyPlayed(container.settings.current.recentlyPlayedIds)
+        // Newest first, by addedAt, rather than the alphabetical ordering the songs() default gives:
+        // a shelf called "recently added" that lists A-Z is simply wrong.
+        recentlyAdded = container.library.recentlyAdded(limit = RECENT_SHELF_LIMIT * 2)
         albums = container.library.albums()
-        artists = container.library.artists()
         playlists = container.library.playlists()
         loaded = true
     }
@@ -235,14 +243,11 @@ fun LibraryScreen(
         }
     }
 
-    fun pickLyric(songId: String) {
-        val file = DesktopDialogs.chooseFile(strings.chooseLyricTitle, LYRIC_EXTENSIONS) ?: return
-        scope.launch {
-            val text = withContext(Dispatchers.IO) { container.scanner.readText(file) }
-            val ok = text != null && container.library.importLyricText(songId, text)
-            message(if (ok) strings.importDone else strings.importFailed.format("lrc"))
-        }
-    }
+    /**
+     * Delegates to the shared importer so the tombstone rule (a song whose lyrics were deleted can
+     * still be given a file) is applied here exactly as it is on every other screen.
+     */
+    val pickLyric = rememberLyricImporter(container, strings, ::message)
 
     fun requestDeviceScan() = importFromDevice()
 
@@ -278,7 +283,7 @@ fun LibraryScreen(
                     onAction = { showImport = true },
                 )
                 else -> {
-                    val liked = songs.filter { it.favorite }.take(SECTION_LIMIT)
+                    val liked = songs.filter { it.favorite }
                     val all = songs
                     HexList(
                         contentPadding = PaddingValues(
@@ -291,14 +296,65 @@ fun LibraryScreen(
                                 StatsCard(
                                     stats = current,
                                     albumCount = albums.size,
-                                    artistCount = artists.size,
+                                    playlistCount = playlists.size,
                                     strings = strings,
+                                    onOpen = onNavigate,
                                 )
                             }
                         }
 
+                        // One row per collection, each opening its own second-level page. Five shelves
+                        // stacked on one scroll was the "排版杂乱" complaint about this tab, and the
+                        // artist index made the page longer without ever being what people opened. The
+                        // index replaces all of them; only the two "recent" shelves stay inline.
+                        item(key = "browse-header") { SectionHeader(strings.browse) }
+                        item(key = "nav-songs") {
+                            NavRow(
+                                title = strings.allSongs,
+                                subtitle = strings.songs(stats?.songCount ?: all.size),
+                                icon = MiuixIcons.Music,
+                                onClick = { onNavigate(Route.LibrarySection(LibrarySection.SONGS.key)) },
+                            )
+                        }
+                        item(key = "nav-albums") {
+                            NavRow(
+                                title = strings.albums,
+                                subtitle = strings.albums(albums.size),
+                                icon = MiuixIcons.Album,
+                                onClick = { onNavigate(Route.LibrarySection(LibrarySection.ALBUMS.key)) },
+                            )
+                        }
+                        item(key = "nav-favorites") {
+                            NavRow(
+                                title = strings.favorites,
+                                subtitle = strings.songs(stats?.favoriteCount ?: liked.size),
+                                icon = MiuixIcons.Favorites,
+                                onClick = { onNavigate(Route.LibrarySection(LibrarySection.FAVORITES.key)) },
+                            )
+                        }
+                        item(key = "nav-recent-added") {
+                            NavRow(
+                                title = strings.recentlyAdded,
+                                subtitle = strings.songs(recentlyAdded.size),
+                                icon = MiuixIcons.Import,
+                                onClick = { onNavigate(Route.LibrarySection(LibrarySection.RECENTLY_ADDED.key)) },
+                            )
+                        }
+                        item(key = "nav-recent-played") {
+                            NavRow(
+                                title = strings.recentlyPlayed,
+                                subtitle = strings.songs(recentlyPlayed.size),
+                                icon = MiuixIcons.Recent,
+                                onClick = { onNavigate(Route.LibrarySection(LibrarySection.RECENTLY_PLAYED.key)) },
+                            )
+                        }
+
                         if (recentlyPlayed.isNotEmpty()) {
-                            item(key = "played-header") { SectionHeader(strings.recentlyPlayed) }
+                            item(key = "played-header") {
+                                SectionHeader(strings.recentlyPlayed, actionLabel = strings.showAll) {
+                                    onNavigate(Route.LibrarySection(LibrarySection.RECENTLY_PLAYED.key))
+                                }
+                            }
                             items(recentlyPlayed.take(RECENT_SHELF_LIMIT), key = { "played-" + it.id }) { song ->
                                 SongRow(
                                     song = song,
@@ -314,60 +370,23 @@ fun LibraryScreen(
                             }
                         }
 
-                        item(key = "recent-header") { SectionHeader(strings.recentlyAdded) }
-                        items(all.take(RECENT_SHELF_LIMIT), key = { "recent-" + it.id }) { song ->
-                            SongRow(
-                                song = song,
-                                strings = strings,
-                                onClick = { playFrom(all, all.indexOf(song).coerceAtLeast(0)) },
-                                onLongClick = {
-                                    actionsSong = song
-                                    showActions = true
-                                },
-                            )
-                        }
-
-                        if (liked.isNotEmpty()) {
-                            item(key = "fav-header") { SectionHeader(strings.favorites) }
-                            items(liked, key = { "fav-" + it.id }) { song ->
+                        if (recentlyAdded.isNotEmpty()) {
+                            item(key = "recent-header") {
+                                SectionHeader(strings.recentlyAdded, actionLabel = strings.showAll) {
+                                    onNavigate(Route.LibrarySection(LibrarySection.RECENTLY_ADDED.key))
+                                }
+                            }
+                            items(recentlyAdded.take(RECENT_SHELF_LIMIT), key = { "recent-" + it.id }) { song ->
                                 SongRow(
                                     song = song,
                                     strings = strings,
-                                    onClick = { playFrom(liked, liked.indexOf(song).coerceAtLeast(0)) },
+                                    onClick = {
+                                        playFrom(recentlyAdded, recentlyAdded.indexOf(song).coerceAtLeast(0))
+                                    },
                                     onLongClick = {
                                         actionsSong = song
                                         showActions = true
                                     },
-                                )
-                            }
-                        }
-
-                        if (albums.isNotEmpty()) {
-                            item(key = "album-header") { SectionHeader(strings.albums) }
-                            items(albums.take(SECTION_LIMIT), key = { "album-" + it.album }) { group ->
-                                CollectionRow(
-                                    title = group.album.ifBlank { strings.unknownAlbum },
-                                    subtitle = group.artist.ifBlank { strings.unknownArtist },
-                                    coverUrl = group.coverUrl,
-                                    overridePath = group.coverOverridePath,
-                                    strings = strings,
-                                    count = group.trackCount,
-                                    onClick = { onNavigate(Route.AlbumDetail(group.album, group.artist)) },
-                                )
-                            }
-                        }
-
-                        if (artists.isNotEmpty()) {
-                            item(key = "artist-header") { SectionHeader(strings.artists) }
-                            items(artists.take(SECTION_LIMIT), key = { "artist-" + it.artist }) { group ->
-                                CollectionRow(
-                                    title = group.artist.ifBlank { strings.unknownArtist },
-                                    subtitle = strings.playlists(group.albumCount),
-                                    coverUrl = null,
-                                    overridePath = null,
-                                    strings = strings,
-                                    count = group.trackCount,
-                                    onClick = { onNavigate(Route.ArtistDetail(group.artist)) },
                                 )
                             }
                         }
@@ -410,7 +429,7 @@ fun LibraryScreen(
                 actionsSong?.id?.let(::pickCover)
             },
             onImportLyric = {
-                actionsSong?.id?.let(::pickLyric)
+                actionsSong?.id?.let { pickLyric(it) }
             },
             onDeleted = { message(strings.delete) },
         )
@@ -419,7 +438,13 @@ fun LibraryScreen(
 
 /** The numeric summary that gives the library a sense of scale at a glance. */
 @Composable
-private fun StatsCard(stats: LibraryStats, albumCount: Int, artistCount: Int, strings: Strings) {
+private fun StatsCard(
+    stats: LibraryStats,
+    albumCount: Int,
+    playlistCount: Int,
+    strings: Strings,
+    onOpen: (Route) -> Unit,
+) {
     Card(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
         cornerRadius = 20.dp,
@@ -431,20 +456,30 @@ private fun StatsCard(stats: LibraryStats, albumCount: Int, artistCount: Int, st
             horizontalArrangement = Arrangement.SpaceEvenly,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            StatCell(strings.songs, stats.songCount.toString(), MiuixIcons.Music)
-            StatCell(strings.albums, albumCount.toString(), MiuixIcons.Album)
-            StatCell(strings.artists, artistCount.toString(), MiuixIcons.Folder)
-            StatCell(strings.favorites, stats.favoriteCount.toString(), MiuixIcons.Favorites)
-            if (stats.neteaseCount > 0) {
-                StatCell(strings.tabPlaylists, stats.playlistCount.toString(), MiuixIcons.CloudFill)
+            // Each figure is also a way in, so the card doubles as the top of the browse index
+            // instead of being four numbers that go nowhere.
+            StatCell(strings.songs, stats.songCount.toString(), MiuixIcons.Music) {
+                onOpen(Route.LibrarySection(LibrarySection.SONGS.key))
+            }
+            StatCell(strings.albums, albumCount.toString(), MiuixIcons.Album) {
+                onOpen(Route.LibrarySection(LibrarySection.ALBUMS.key))
+            }
+            StatCell(strings.favorites, stats.favoriteCount.toString(), MiuixIcons.Favorites) {
+                onOpen(Route.LibrarySection(LibrarySection.FAVORITES.key))
+            }
+            StatCell(strings.tabPlaylists, playlistCount.toString(), MiuixIcons.Playlist) {
+                onOpen(Route.Playlists)
             }
         }
     }
 }
 
 @Composable
-private fun StatCell(label: String, value: String, icon: ImageVector) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+private fun StatCell(label: String, value: String, icon: ImageVector, onClick: () -> Unit) {
+    Column(
+        modifier = Modifier.clickable(onClick = onClick).padding(horizontal = 8.dp, vertical = 6.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
         Icon(
             imageVector = icon,
             contentDescription = null,
@@ -460,6 +495,11 @@ private fun StatCell(label: String, value: String, icon: ImageVector) {
         )
     }
 }
+
+/**
+ * One entry of the browse index. The row shape lives in [com.hexnc.music.ui.components.NavRow]
+ * because the playlists tab needs the same one for its NetEase album entry.
+ */
 
 /** Import entry points, presented as a sheet so the app bar stays a single icon. */
 @Composable

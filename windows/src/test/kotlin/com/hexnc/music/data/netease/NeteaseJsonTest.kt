@@ -134,6 +134,24 @@ class NeteaseJsonTest {
     }
 
     @Test
+    fun `reads the favourited album list from the data key`() {
+        // The live endpoint puts the list under `data`, not `albums`. Declaring `albums` decoded an
+        // empty page for an account with 46 favourites, and the sync pass then cached "no albums".
+        val payload = """
+            {"data":[{"id":1548962,"name":"Deja Entendu",
+            "picUrl":"https://p2.music.126.net/x.jpg",
+            "artists":[{"id":48438,"name":"Brand New"}],"size":11}],
+            "more":true,"code":200}
+        """.trimIndent()
+        val response = json.decodeFromString<NcAlbumSublistResponse>(payload)
+        assertEquals(1, response.albums.size)
+        assertEquals("Deja Entendu", response.albums[0].name)
+        assertEquals("Brand New", response.albums[0].artistName)
+        assertEquals(11, response.albums[0].size)
+        assertTrue(response.morePages)
+    }
+
+    @Test
     fun `decodes an instrumental lyric response`() {
         val payload = """{"lrc":{"version":1,"lyric":""},"nolyric":true,"uncollected":false,"code":200}"""
         val response = json.decodeFromString<NcLyricResponse>(payload)

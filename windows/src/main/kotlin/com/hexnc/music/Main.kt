@@ -2,6 +2,9 @@ package com.hexnc.music
 
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.graphics.painter.BitmapPainter
+import androidx.compose.ui.graphics.painter.Painter
+import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isCtrlPressed
@@ -16,6 +19,7 @@ import androidx.compose.ui.window.rememberWindowState
 import com.hexnc.music.ui.HexNCRoot
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import javax.imageio.ImageIO
 
 /**
  * The desktop entry point.
@@ -32,6 +36,23 @@ import kotlinx.coroutines.withContext
  * Ctrl+M mutes. `onKeyEvent` runs after the focused component, so a space typed into the search
  * field still inserts a space — nothing here steals a character a text field wanted.
  */
+/**
+ * The window mark, loaded from the bundled `hexnc.png`.
+ *
+ * jpackage stamps the same artwork into the launcher exe (`packaging/windows/hexnc.ico`, wired in
+ * `build.gradle.kts`), but a live window keeps whatever icon it was created with: without this,
+ * the packaged app's taskbar button and Alt-Tab entry still showed the generic Java cup until the
+ * window was closed and Explorer re-read the exe. Loading the same bytes here keeps them in sync.
+ *
+ * Returns null when the resource is missing so an icon problem can never stop the app from
+ * starting.
+ */
+private fun appIcon(): Painter? = runCatching {
+    val bytes = object {}.javaClass.getResourceAsStream("/hexnc.png")?.use { it.readBytes() }
+        ?: return@runCatching null
+    BitmapPainter(ImageIO.read(bytes.inputStream()).toComposeImageBitmap())
+}.getOrNull()
+
 fun main() {
     runCatching {
         javax.swing.UIManager.setLookAndFeel(javax.swing.UIManager.getSystemLookAndFeelClassName())
@@ -69,6 +90,7 @@ fun main() {
                 exitApplication()
             },
             title = "HexNC",
+            icon = appIcon(),
             state = rememberWindowState(size = DpSize(1180.dp, 780.dp)),
             onKeyEvent = { event ->
                 // Media keys are owned by the OS on Windows, but the usual desktop shortcuts are

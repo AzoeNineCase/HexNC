@@ -1,0 +1,12 @@
+.gradle
+.kotlin
+build
+out
+_relprobe
+*.msi
+*.exe
+*.log
+local.properties
+.idea
+*.iml
+.DS_Store
